@@ -8,10 +8,10 @@ unsigned long lastRotationUpdate = 0;
 unsigned long lastTimeUpdate = 0;
 
 TFT_eSPI tft = TFT_eSPI();
-TFT_eSprite btc_logo = TFT_eSprite(&tft);
+TFT_eSprite paxg_badge = TFT_eSprite(&tft);
 TFT_eSprite back_logo = TFT_eSprite(&tft);
-TFT_eSprite btc_price = TFT_eSprite(&tft);
-TFT_eSprite btc_percents = TFT_eSprite(&tft);
+TFT_eSprite paxg_price = TFT_eSprite(&tft);
+TFT_eSprite paxg_percents = TFT_eSprite(&tft);
 TFT_eSprite chart = TFT_eSprite(&tft);
 TFT_eSprite sessions = TFT_eSprite(&tft);
 TFT_eSprite clock_display = TFT_eSprite(&tft);

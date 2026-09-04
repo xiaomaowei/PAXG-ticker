@@ -16,5 +16,5 @@ constexpr unsigned long PRICE_UPDATE_INTERVAL = 60000UL;
 constexpr unsigned long MODE0_UPDATE_INTERVAL = 60000UL;   // standard price
 constexpr unsigned long MODE1_UPDATE_INTERVAL = 5000UL;    // clock
 constexpr unsigned long MODE2_UPDATE_INTERVAL = 300000UL;  // weather
-constexpr unsigned long ROTATION_INTERVAL = 15UL;          // BTC logo rotation speed
+constexpr unsigned long ROTATION_INTERVAL = 15UL;          // PAXG badge rotation speed
 constexpr int HOLD_TIME = 1000;                            //  time needed to hold the button

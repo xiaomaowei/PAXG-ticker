@@ -7,15 +7,16 @@
 #include <images/RedArrow32.h>
 #include <images/UK24.h>
 #include <images/US24.h>
-#include <images/bitcoin_white_73.h>
 #include <images/moon24.h>
 #include <modules/app_state.h>
 #include <modules/constants.h>
-#include <modules/modes/bitcoin_mode.h>
+#include <modules/modes/paxg_mode.h>
 #include <modules/sprites.h>
 #include <modules/variables.h>
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <vector>
 
 namespace
@@ -39,11 +40,9 @@ constexpr int CHART_Y_SCALE = 75;
 constexpr int CHART_SPRITE_X = 115;
 constexpr int CHART_SPRITE_Y = 70;
 
-constexpr int PRICE_CURSOR_X = 0;
-constexpr int PRICE_CURSOR_Y = 35;
 constexpr int PRICE_SPRITE_X = 118;
 constexpr int PRICE_SPRITE_Y = 15;
-constexpr int PRICE_MILLION_THRESHOLD = 1000000;
+constexpr int PRICE_TEXT_BASELINE_Y = 32;
 
 constexpr int PERCENT_TEXT_CENTER_X = 57;
 constexpr int PERCENT_TEXT_BASELINE_Y = 28;
@@ -54,12 +53,13 @@ constexpr int PERCENT_ARROW_HEIGHT = 32;
 constexpr int PERCENT_SPRITE_X = 0;
 constexpr int PERCENT_SPRITE_Y = 85;
 
-constexpr int BTC_LOGO_X = 0;
-constexpr int BTC_LOGO_Y = 0;
-constexpr int BTC_LOGO_WIDTH = 73;
-constexpr int BTC_LOGO_HEIGHT = 73;
-constexpr int BTC_PIVOT_X = 57;
-constexpr int BTC_PIVOT_Y = 47;
+constexpr int BADGE_CENTER_X = 36;
+constexpr int BADGE_CENTER_Y = 36;
+constexpr int BADGE_OUTER_RADIUS = 35;
+constexpr int BADGE_INNER_RADIUS = 31;
+constexpr int BADGE_TEXT_CENTER_X = 36;
+constexpr int BADGE_TEXT_BASELINE_Y = 44;
+
 constexpr int ROTATION_BACK_CIRCLE_X = 37;
 constexpr int ROTATION_BACK_CIRCLE_Y = 37;
 constexpr int ROTATION_BACK_CIRCLE_RADIUS = 34;
@@ -87,7 +87,7 @@ constexpr int JP_CLOSE_MINUTE = 479;
 constexpr int HTTP_TIMEOUT_MS = 8000;
 constexpr unsigned long WIFI_RECOVERY_INTERVAL_MS = 30000UL;
 constexpr int MAX_FAILED_FETCHES_BEFORE_RECOVERY = 3;
-constexpr const char API_BTC_PRICE[] = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT";
+constexpr const char API_PAXG_PRICE[] = "https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT";
 
 int consecutivePriceFetchFailures = 0;
 unsigned long lastWiFiRecoveryAttempt = 0;
@@ -150,13 +150,13 @@ void display_price_chart()
     }
 
     auto minmax = std::minmax_element(readings.begin(), readings.end());
-    int curveMin = *minmax.first;
-    int curveMax = *minmax.second;
+    double curveMin = *minmax.first;
+    double curveMax = *minmax.second;
 
-    int curveRange = curveMax - curveMin;
-    if (curveRange == 0)
+    double curveRange = curveMax - curveMin;
+    if (curveRange <= 0.0001)
     {
-        curveRange = 1;
+        curveRange = 1.0;
     }
 
     int previousX = 0;
@@ -164,8 +164,8 @@ void display_price_chart()
 
     for (size_t i = 0; i < readings.size(); ++i)
     {
-        int priceDeviation = curveMax - readings[i];
-        double relativeDeviation = static_cast<double>(priceDeviation) / curveRange;
+        double priceDeviation = curveMax - readings[i];
+        double relativeDeviation = priceDeviation / curveRange;
         int currentX = CHART_FIRST_POINT_X -
                        ((static_cast<int>(readings.size()) - static_cast<int>(i) - 1) * CHART_STEP);
         int currentY = static_cast<int>(CHART_FIRST_POINT_Y + relativeDeviation * CHART_Y_SCALE);
@@ -185,47 +185,68 @@ void display_price_chart()
 
 void display_price()
 {
-    btc_price.setTextSize(1);
-    btc_price.setFreeFont(&FreeMonoBold24pt7b);
-    btc_price.setCursor(PRICE_CURSOR_X, PRICE_CURSOR_Y);
-    btc_price.fillSprite(TFT_BLACK);
-    if (price < PRICE_MILLION_THRESHOLD)
+    char priceBuffer[32];
+    std::snprintf(priceBuffer, sizeof(priceBuffer), "$%.2f", price);
+
+    paxg_price.fillSprite(TFT_BLACK);
+    paxg_price.setTextSize(1);
+    paxg_price.setFreeFont(&FreeSansBold18pt7b);
+    paxg_price.setTextColor(TFT_WHITE);
+
+    int textW = paxg_price.textWidth(priceBuffer);
+    int cursorX = 0;
+    if (textW < 205)
     {
-        btc_price.print("$");
+        cursorX = (205 - textW) / 2;
     }
-    btc_price.print(price);
-    btc_price.pushSprite(PRICE_SPRITE_X, PRICE_SPRITE_Y);
+
+    paxg_price.setCursor(cursorX, PRICE_TEXT_BASELINE_Y);
+    paxg_price.print(priceBuffer);
+    paxg_price.pushSprite(PRICE_SPRITE_X, PRICE_SPRITE_Y);
 }
 
 void display_percent_change()
 {
-    String output = String(percentChange) + "%";
+    String output = String(percentChange, 2) + "%";
 
-    btc_percents.fillSprite(TFT_BLACK);
-    btc_percents.setTextSize(1);
-    btc_percents.setFreeFont(&FreeMonoBold12pt7b);
-    btc_percents.setCursor(PERCENT_TEXT_CENTER_X - (btc_percents.textWidth(output) / 2),
-                           PERCENT_TEXT_BASELINE_Y);
-    btc_percents.print(output);
+    paxg_percents.fillSprite(TFT_BLACK);
+    paxg_percents.setTextSize(1);
+    paxg_percents.setFreeFont(&FreeMonoBold12pt7b);
+    paxg_percents.setTextColor(TFT_WHITE);
+    paxg_percents.setCursor(PERCENT_TEXT_CENTER_X - (paxg_percents.textWidth(output) / 2),
+                            PERCENT_TEXT_BASELINE_Y);
+    paxg_percents.print(output);
 
     if (percentChange > 0)
     {
-        btc_percents.pushImage(PERCENT_ARROW_X, PERCENT_ARROW_Y, PERCENT_ARROW_WIDTH,
-                               PERCENT_ARROW_HEIGHT, GreenArrow);
+        paxg_percents.pushImage(PERCENT_ARROW_X, PERCENT_ARROW_Y, PERCENT_ARROW_WIDTH,
+                                PERCENT_ARROW_HEIGHT, GreenArrow);
     }
     else
     {
-        btc_percents.pushImage(PERCENT_ARROW_X, PERCENT_ARROW_Y, PERCENT_ARROW_WIDTH,
-                               PERCENT_ARROW_HEIGHT, RedArrow);
+        paxg_percents.pushImage(PERCENT_ARROW_X, PERCENT_ARROW_Y, PERCENT_ARROW_WIDTH,
+                                PERCENT_ARROW_HEIGHT, RedArrow);
     }
 
-    btc_percents.pushSprite(PERCENT_SPRITE_X, PERCENT_SPRITE_Y);
+    paxg_percents.pushSprite(PERCENT_SPRITE_X, PERCENT_SPRITE_Y);
 }
 
-void display_btc_logo()
+void display_paxg_badge()
 {
-    btc_logo.pushImage(BTC_LOGO_X, BTC_LOGO_Y, BTC_LOGO_WIDTH, BTC_LOGO_HEIGHT, bitcoin_icon);
-    tft.setPivot(BTC_PIVOT_X, BTC_PIVOT_Y);
+    paxg_badge.fillSprite(TFT_BLACK);
+    paxg_badge.fillCircle(BADGE_CENTER_X, BADGE_CENTER_Y, BADGE_OUTER_RADIUS, TFT_GOLD);
+    paxg_badge.drawCircle(BADGE_CENTER_X, BADGE_CENTER_Y, BADGE_OUTER_RADIUS, TFT_YELLOW);
+    paxg_badge.drawCircle(BADGE_CENTER_X, BADGE_CENTER_Y, BADGE_INNER_RADIUS, TFT_BLACK);
+
+    paxg_badge.setFreeFont(&FreeSansBold12pt7b);
+    paxg_badge.setTextSize(1);
+    paxg_badge.setTextColor(TFT_BLACK);
+    const char* label = "PAXG";
+    int labelWidth = paxg_badge.textWidth(label);
+    paxg_badge.setCursor(BADGE_TEXT_CENTER_X - (labelWidth / 2), BADGE_TEXT_BASELINE_Y);
+    paxg_badge.print(label);
+
+    tft.setPivot(BADGE_CENTER_X, BADGE_CENTER_Y);
 }
 
 void sessions_panel()
@@ -277,23 +298,21 @@ void update_price_chart()
 
 }  // namespace
 
-void bitcoin_update_price()
+void paxg_update_price()
 {
     lastPriceUpdate = currentMillis;
 
     if (WiFi.status() != WL_CONNECTED)
     {
-        Serial.println("WiFi disconnected, skipping BTC fetch");
+        Serial.println("WiFi disconnected, skipping PAXG fetch");
         mark_price_update_failed();
         return;
     }
 
-    btc_price.setFreeFont(&FreeMonoBold24pt7b);
-
     HTTPClient http;
     http.setConnectTimeout(HTTP_TIMEOUT_MS);
     http.setTimeout(HTTP_TIMEOUT_MS);
-    http.begin(API_BTC_PRICE);
+    http.begin(API_PAXG_PRICE);
     int httpCode = http.GET();
 
     if (httpCode == HTTP_CODE_OK)
@@ -310,10 +329,13 @@ void bitcoin_update_price()
         }
         else
         {
-            double lastPriceDouble = doc["lastPrice"].as<double>();
-            price = static_cast<int>(lastPriceDouble);
+            price = doc["lastPrice"].as<double>();
             percentChange = doc["priceChangePercent"].as<double>();
             mark_price_update_succeeded();
+
+            char msg[80];
+            std::snprintf(msg, sizeof(msg), "PAXG price updated: $%.2f, %.2f%%", price, percentChange);
+            Serial.println(msg);
         }
     }
     else
@@ -326,7 +348,7 @@ void bitcoin_update_price()
     http.end();
 }
 
-void bitcoin_sync_chart()
+void paxg_sync_chart()
 {
     if (chartTimeChange == chartTime)
     {
@@ -343,7 +365,7 @@ void bitcoin_sync_chart()
     }
 }
 
-void bitcoin_render()
+void paxg_render()
 {
     chart_background();
 
@@ -358,20 +380,20 @@ void bitcoin_render()
     sessions_panel();
 }
 
-void bitcoin_logo_rotation()
+void paxg_logo_rotation()
 {
     const unsigned long now = millis();
 
     if (changed_mode)
     {
-        display_btc_logo();
+        display_paxg_badge();
     }
 
     if (now - lastRotationUpdate >= ROTATION_INTERVAL)
     {
         back_logo.fillCircle(ROTATION_BACK_CIRCLE_X, ROTATION_BACK_CIRCLE_Y,
-                             ROTATION_BACK_CIRCLE_RADIUS, TFT_ORANGE);
-        btc_logo.pushRotated(&back_logo, angle, TFT_BLACK);
+                             ROTATION_BACK_CIRCLE_RADIUS, TFT_GOLD);
+        paxg_badge.pushRotated(&back_logo, angle, TFT_BLACK);
         back_logo.pushSprite(ROTATION_SPRITE_X, ROTATION_SPRITE_Y);
 
         if (reversal)

@@ -6,7 +6,7 @@
 
 enum class DisplayMode : int
 {
-    Bitcoin = 0,
+    PAXG = 0,
     Clock = 1,
     Weather = 2,
 };
@@ -23,12 +23,12 @@ extern byte currentBrightness;
 
 extern int pointRadius;
 extern int curveColor;
-extern int price;
+extern double price;
 extern int chartTime;
 extern double percentChange;
 extern int chartTimeChange;
 extern bool priceFreshSample;
-extern std::vector<int> readings;
+extern std::vector<double> readings;
 
 extern int globalMinutes;
 extern int globalHours;

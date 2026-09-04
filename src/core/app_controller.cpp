@@ -4,8 +4,8 @@
 #include <modules/constants.h>
 #include <modules/display_setup.h>
 #include <modules/hal/brightness_control.h>
-#include <modules/modes/bitcoin_mode.h>
 #include <modules/modes/clock_mode.h>
+#include <modules/modes/paxg_mode.h>
 #include <modules/modes/weather_mode.h>
 #include <modules/sprites.h>
 #include <modules/variables.h>
@@ -72,11 +72,11 @@ void render_active_mode()
     // Each mode has its own cadence to keep UI responsive while avoiding unnecessary redraws.
     switch (mode)
     {
-        case DisplayMode::Bitcoin:
-            bitcoin_logo_rotation();
+        case DisplayMode::PAXG:
+            paxg_logo_rotation();
             if (currentMillis - lastModeUpdate >= MODE0_UPDATE_INTERVAL || changed_mode)
             {
-                bitcoin_render();
+                paxg_render();
                 update_mode_variables();
             }
             break;
@@ -106,6 +106,7 @@ void render_active_mode()
 void app_setup()
 {
     Serial.begin(SERIAL_BAUD_RATE);
+    Serial.println("PAXG ticker starting up");
     initialize_display();
     initialize_input();
     initialize_sprites();
@@ -114,10 +115,10 @@ void app_setup()
     connect_wifi();
     // ESP32 helper that applies TZ rules and starts NTP sync in one call.
     configTzTime(APP_TIMEZONE, NTP_SERVER);
-    bitcoin_update_price();
+    paxg_update_price();
     clock_update_time();
     adjust_brightness();
-    bitcoin_sync_chart();
+    paxg_sync_chart();
 }
 
 void app_loop()
@@ -128,13 +129,13 @@ void app_loop()
     // Data updates run independently from mode rendering, so mode switches stay snappy.
     if (currentMillis - lastPriceUpdate >= PRICE_UPDATE_INTERVAL)
     {
-        bitcoin_update_price();
+        paxg_update_price();
     }
 
     if (currentMillis - lastTimeUpdate >= TIME_UPDATE_INTERVAL)
     {
         clock_update_time();
-        bitcoin_sync_chart();
+        paxg_sync_chart();
     }
 
     // Apply smooth non-blocking brightness transitions continuously.

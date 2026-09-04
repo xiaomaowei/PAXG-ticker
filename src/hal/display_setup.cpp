@@ -13,16 +13,16 @@ constexpr int DEFAULT_TEXT_SIZE = 2;
 
 constexpr int BACK_LOGO_WIDTH = 74;
 constexpr int BACK_LOGO_HEIGHT = 74;
-constexpr int BTC_LOGO_WIDTH = 73;
-constexpr int BTC_LOGO_HEIGHT = 73;
-constexpr int BTC_PRICE_WIDTH = 205;
-constexpr int BTC_PRICE_HEIGHT = 45;
+constexpr int PAXG_BADGE_WIDTH = 73;
+constexpr int PAXG_BADGE_HEIGHT = 73;
+constexpr int PAXG_PRICE_WIDTH = 205;
+constexpr int PAXG_PRICE_HEIGHT = 45;
 constexpr int CHART_WIDTH = 173;
 constexpr int CHART_HEIGHT = 100;
 constexpr int SESSIONS_WIDTH = 32;
 constexpr int SESSIONS_HEIGHT = 100;
-constexpr int BTC_PERCENTS_WIDTH = 115;
-constexpr int BTC_PERCENTS_HEIGHT = 86;
+constexpr int PAXG_PERCENTS_WIDTH = 115;
+constexpr int PAXG_PERCENTS_HEIGHT = 86;
 constexpr int CLOCK_DISPLAY_WIDTH = 320;
 constexpr int CLOCK_DISPLAY_HEIGHT = 170;
 constexpr int WEATHER_ICON_WIDTH = 100;
@@ -57,11 +57,11 @@ void initialize_input()
 void initialize_sprites()
 {
     back_logo.createSprite(BACK_LOGO_WIDTH, BACK_LOGO_HEIGHT);
-    btc_logo.createSprite(BTC_LOGO_WIDTH, BTC_LOGO_HEIGHT);
-    btc_price.createSprite(BTC_PRICE_WIDTH, BTC_PRICE_HEIGHT);
+    paxg_badge.createSprite(PAXG_BADGE_WIDTH, PAXG_BADGE_HEIGHT);
+    paxg_price.createSprite(PAXG_PRICE_WIDTH, PAXG_PRICE_HEIGHT);
     chart.createSprite(CHART_WIDTH, CHART_HEIGHT);
     sessions.createSprite(SESSIONS_WIDTH, SESSIONS_HEIGHT);
-    btc_percents.createSprite(BTC_PERCENTS_WIDTH, BTC_PERCENTS_HEIGHT);
+    paxg_percents.createSprite(PAXG_PERCENTS_WIDTH, PAXG_PERCENTS_HEIGHT);
     clock_display.createSprite(CLOCK_DISPLAY_WIDTH, CLOCK_DISPLAY_HEIGHT);
     weatherIcon.createSprite(WEATHER_ICON_WIDTH, WEATHER_ICON_HEIGHT);
     temperature.createSprite(TEMPERATURE_WIDTH, TEMPERATURE_HEIGHT);
@@ -72,9 +72,9 @@ void initialize_sprites()
 
 void configure_sprite_swap_bytes()
 {
-    btc_logo.setSwapBytes(true);
+    paxg_badge.setSwapBytes(true);
     sessions.setSwapBytes(true);
-    btc_percents.setSwapBytes(true);
+    paxg_percents.setSwapBytes(true);
     weatherIcon.setSwapBytes(true);
     temperatureExtremes.setSwapBytes(true);
 }

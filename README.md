@@ -1,14 +1,18 @@
-# BTCticker
+# PAXG-ticker
 
-BTCticker is an ESP32 firmware project for the LILYGO T-Display S3. The device presents Bitcoin market data and utility dashboards on the built-in display.
+PAXG-ticker is an ESP32 firmware project for the LILYGO T-Display S3. The device presents PAX Gold (PAXG) market data and utility dashboards on the built-in display.
 
 ## Features
 
-- Live BTC price and 24h change display
-- Animated Bitcoin mode with chart and session panel
+- Live PAXG price and 24h change display
+- Animated PAXG mode with chart and session panel
 - Digital clock mode
 - Weather mode
 - Button-based mode switching
+
+## Market Data Source
+
+Market data is retrieved from Binance public 24h ticker endpoint (`https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT`) using symbol `PAXGUSDT`.
 
 ## Screenshots
 
@@ -25,10 +29,10 @@ The flow below is grouped by setup screens first, then display modes.
 
 #### Modes
 
-| Bitcoin Ticker | Weather | Clock |
-| --- | --- | --- |
-| [![Bitcoin](screenshots/bitcoin.png)](screenshots/bitcoin.png) | [![Weather](screenshots/weather.png)](screenshots/weather.png) | [![Clock](screenshots/clock.png)](screenshots/clock.png) |
-| Price, change, and chart panel | Conditions and rain profile | Digital clock card |
+| Weather | Clock |
+| --- | --- |
+| [![Weather](screenshots/weather.png)](screenshots/weather.png) | [![Clock](screenshots/clock.png)](screenshots/clock.png) |
+| Conditions and rain profile | Digital clock card |
 
 #### Detail Panels
 
@@ -50,7 +54,7 @@ Tip: Click any image to open the full-size version.
 ## Repository Layout
 
 - [src/core](src/core): app loop/controller and shared runtime globals
-- [src/modes](src/modes): mode implementations (bitcoin, clock, weather)
+- [src/modes](src/modes): mode implementations (paxg, clock, weather)
 - [src/hal](src/hal): hardware-facing modules (display, wifi, brightness, ui utils)
 - [include/modules/modes](include/modules/modes): canonical mode headers
 - [include/modules/hal](include/modules/hal): canonical HAL headers

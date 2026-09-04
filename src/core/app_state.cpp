@@ -3,7 +3,7 @@
 
 #include <vector>
 
-DisplayMode mode = DisplayMode::Bitcoin;
+DisplayMode mode = DisplayMode::PAXG;
 bool changed_mode = true;
 
 int angle = 0;
@@ -15,12 +15,12 @@ byte currentBrightness = 120;
 
 int pointRadius = 3;
 int curveColor = TFT_BLUE;
-int price = 0;
+double price = 0.0;
 int chartTime = 0;
 double percentChange = 0.0;
 int chartTimeChange = 0;
 bool priceFreshSample = false;
-std::vector<int> readings;
+std::vector<double> readings;
 
 int globalMinutes = 0;
 int globalHours = 0;
