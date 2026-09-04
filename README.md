@@ -97,9 +97,10 @@ Wi-Fi credentials are provided through a local .env file in the repository root.
 ```env
 WIFI_SSID=your_wifi_name
 WIFI_PASSWORD=your_wifi_password
-APP_TIMEZONE=CET-1CEST,M3.5.0/2,M10.5.0/3
-WEATHER_CITY=Prague
-WEATHER_COUNTRY=CZ
+# POSIX timezone string (e.g. CST-8 is Taiwan UTC+8 without DST)
+APP_TIMEZONE=CST-8
+WEATHER_CITY=Taipei
+WEATHER_COUNTRY=TW
 ```
 
 Build integration:
