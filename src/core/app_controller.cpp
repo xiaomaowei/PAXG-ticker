@@ -4,6 +4,7 @@
 #include <modules/constants.h>
 #include <modules/display_setup.h>
 #include <modules/hal/brightness_control.h>
+#include <modules/hal/usb_hid_keyboard.h>
 #include <modules/modes/clock_mode.h>
 #include <modules/modes/fishing_mode.h>
 #include <modules/modes/paxg_mode.h>
@@ -56,9 +57,10 @@ void update_mode_variables()
  *   backward (Button DOWN) as before, regardless of how long the button was held.
  * - In-Mode Gestures (Fishing Mode only):
  *   * Short Press (< 800ms, on release) -> Navigate mode forward/backward as usual.
- *   * Long Press (Hold >= 800ms)        -> Trigger Fishing action immediately:
+ *   * Long Press (Hold >= 800ms):
  *       - Button UP: Start / Pause / Resume simulation.
  *       - Button DOWN: Stop simulation (1st hold) / Reset counters (2nd hold).
+ *       - Both Buttons: Toggle Armed / Disarmed safety state.
  *     Sets buttonUpLongPressHandled / buttonDownLongPressHandled to suppress mode
  *     cycling on the subsequent release exclusively for the in-mode gesture.
  * - Setup Non-Interference:
@@ -94,22 +96,17 @@ void handle_mode_switch_buttons()
                 // In Fishing mode, navigate only if in-mode long-press gesture was not handled.
                 if (mode != DisplayMode::Fishing || !buttonUpLongPressHandled)
                 {
+                    if (mode == DisplayMode::Fishing)
+                    {
+                        fishingArmed = false;
+                        usb_hid_keyboard_clear_and_release_all();
+                    }
                     mode = static_cast<DisplayMode>((static_cast<int>(mode) + 1) % MODE_COUNT);
                     changed_mode = true;
                     tft.fillScreen(TFT_BLACK);
                 }
                 buttonUpLongPressHandled = false;
             }
-        }
-    }
-
-    // Long-press hold detection for Button UP: active exclusively in Fishing mode
-    if (mode == DisplayMode::Fishing && buttonUpDebounced && !buttonUpLongPressHandled)
-    {
-        if ((currentMillis - buttonUpPressStartTime) >= BUTTON_LONG_PRESS_MS)
-        {
-            fishing_toggle_start_pause();
-            buttonUpLongPressHandled = true;
         }
     }
 
@@ -138,6 +135,11 @@ void handle_mode_switch_buttons()
                 // In Fishing mode, navigate only if in-mode long-press gesture was not handled.
                 if (mode != DisplayMode::Fishing || !buttonDownLongPressHandled)
                 {
+                    if (mode == DisplayMode::Fishing)
+                    {
+                        fishingArmed = false;
+                        usb_hid_keyboard_clear_and_release_all();
+                    }
                     mode = static_cast<DisplayMode>((static_cast<int>(mode) - 1 + MODE_COUNT) % MODE_COUNT);
                     changed_mode = true;
                     tft.fillScreen(TFT_BLACK);
@@ -147,13 +149,40 @@ void handle_mode_switch_buttons()
         }
     }
 
-    // Long-press hold detection for Button DOWN: active exclusively in Fishing mode
-    if (mode == DisplayMode::Fishing && buttonDownDebounced && !buttonDownLongPressHandled)
+    // --- In-Mode Long-Press Gestures (active exclusively in Fishing mode) ---
+    if (mode == DisplayMode::Fishing)
     {
-        if ((currentMillis - buttonDownPressStartTime) >= BUTTON_LONG_PRESS_MS)
+        // Dual-button long press: Toggle Armed / Disarmed
+        if (buttonUpDebounced && buttonDownDebounced && !buttonUpLongPressHandled && !buttonDownLongPressHandled)
         {
-            fishing_stop_reset();
-            buttonDownLongPressHandled = true;
+            const unsigned long upDuration = currentMillis - buttonUpPressStartTime;
+            const unsigned long downDuration = currentMillis - buttonDownPressStartTime;
+            if (upDuration >= BUTTON_LONG_PRESS_MS && downDuration >= BUTTON_LONG_PRESS_MS)
+            {
+                fishing_toggle_arm();
+                buttonUpLongPressHandled = true;
+                buttonDownLongPressHandled = true;
+            }
+        }
+
+        // Long-press Button UP: Toggle Start / Pause
+        if (buttonUpDebounced && !buttonDownDebounced && !buttonUpLongPressHandled)
+        {
+            if ((currentMillis - buttonUpPressStartTime) >= BUTTON_LONG_PRESS_MS)
+            {
+                fishing_toggle_start_pause();
+                buttonUpLongPressHandled = true;
+            }
+        }
+
+        // Long-press Button DOWN: Stop / Reset
+        if (buttonDownDebounced && !buttonUpDebounced && !buttonDownLongPressHandled)
+        {
+            if ((currentMillis - buttonDownPressStartTime) >= BUTTON_LONG_PRESS_MS)
+            {
+                fishing_stop_reset();
+                buttonDownLongPressHandled = true;
+            }
         }
     }
 }
@@ -219,12 +248,14 @@ void app_setup()
     adjust_brightness();
     paxg_sync_chart();
     fishing_mode_init();
+    usb_hid_keyboard_init();
 }
 
 void app_loop()
 {
     currentMillis = millis();
     handle_mode_switch_buttons();
+    usb_hid_keyboard_tick();
 
     // Data updates run independently from mode rendering, so mode switches stay snappy.
     if (currentMillis - lastPriceUpdate >= PRICE_UPDATE_INTERVAL)

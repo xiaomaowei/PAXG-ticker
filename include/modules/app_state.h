@@ -35,6 +35,8 @@ extern float fishingSimAudioThreshold;
 extern bool fishingAudioDetected;
 extern unsigned long fishingNextBiteDelayMs;
 extern unsigned long fishingWaitMaxMs;
+extern bool fishingArmed;
+extern unsigned int fishingLiveKeySentCount;
 
 extern int angle;
 extern int angleMax;

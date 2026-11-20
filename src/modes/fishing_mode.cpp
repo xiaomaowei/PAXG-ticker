@@ -1,6 +1,7 @@
 #include <TFT_eSPI.h>
 #include <modules/app_state.h>
 #include <modules/constants.h>
+#include <modules/hal/usb_hid_keyboard.h>
 #include <modules/modes/fishing_mode.h>
 #include <modules/sprites.h>
 #include <modules/variables.h>
@@ -76,10 +77,30 @@ void fishing_mode_init()
     fishingAudioDetected = false;
     fishingNextBiteDelayMs = 0;
     fishingWaitMaxMs = 20000UL;
+    fishingArmed = false;
+    fishingLiveKeySentCount = 0;
 
     for (int i = 0; i < AUDIO_HISTORY_COUNT; ++i)
     {
         audioHistory[i] = 0.05f;
+    }
+}
+
+void fishing_toggle_arm()
+{
+    if (!usb_hid_is_connected())
+    {
+        // Host not mounted: reject arming, keep disarmed and clear queue
+        fishingArmed = false;
+        usb_hid_keyboard_clear_and_release_all();
+        return;
+    }
+
+    fishingArmed = !fishingArmed;
+    if (!fishingArmed)
+    {
+        // Safe clear and release on disarm
+        usb_hid_keyboard_clear_and_release_all();
     }
 }
 
@@ -95,6 +116,10 @@ void fishing_toggle_start_pause()
         fishingSimReelCmds = 0;
         fishingSimTimeouts = 0;
         fishingAudioDetected = false;
+        if (fishingArmed)
+        {
+            usb_hid_keyboard_enqueue(FISHING_KEY_CAST);
+        }
     }
     else if (fishingState == FishingState::Paused)
     {
@@ -102,13 +127,18 @@ void fishing_toggle_start_pause()
         fishingState = FishingState::Casting;
         fishingStateStartTime = currentMillis;
         fishingAudioDetected = false;
+        if (fishingArmed)
+        {
+            usb_hid_keyboard_enqueue(FISHING_KEY_CAST);
+        }
     }
     else
     {
-        // Pause active simulation
+        // Pause active simulation: release all keys and clear queue
         fishingState = FishingState::Paused;
         fishingAudioDetected = false;
         fishingSimAudioLevel = 0.05f;
+        usb_hid_keyboard_clear_and_release_all();
     }
 }
 
@@ -116,10 +146,12 @@ void fishing_stop_reset()
 {
     if (fishingState != FishingState::Stopped)
     {
-        // First press: Stop simulation
+        // First press: Stop simulation and disarm
         fishingState = FishingState::Stopped;
         fishingAudioDetected = false;
         fishingSimAudioLevel = 0.05f;
+        fishingArmed = false;
+        usb_hid_keyboard_clear_and_release_all();
     }
     else
     {
@@ -127,11 +159,16 @@ void fishing_stop_reset()
         fishingSimReelCmds = 0;
         fishingSimTimeouts = 0;
         fishingTotalUptimeMs = 0;
+        fishingLiveKeySentCount = 0;
+        fishingArmed = false;
+        usb_hid_keyboard_clear_and_release_all();
     }
 }
 
 void fishing_sim_tick()
 {
+    usb_hid_keyboard_tick();
+
     if (lastSimTick == 0)
     {
         lastSimTick = currentMillis;
@@ -197,6 +234,10 @@ void fishing_sim_tick()
                     fishingAudioDetected = true;
                     // Trigger simulated reel command and transition
                     fishingSimReelCmds++;
+                    if (fishingArmed)
+                    {
+                        usb_hid_keyboard_enqueue(FISHING_KEY_INTERACT);
+                    }
                     fishingState = FishingState::Reeling;
                     fishingStateStartTime = currentMillis;
                 }
@@ -208,6 +249,10 @@ void fishing_sim_tick()
                 fishingAudioDetected = false;
                 fishingState = FishingState::Casting;
                 fishingStateStartTime = currentMillis;
+                if (fishingArmed)
+                {
+                    usb_hid_keyboard_enqueue(FISHING_KEY_CAST);
+                }
             }
             else
             {
@@ -228,6 +273,10 @@ void fishing_sim_tick()
                 // Cycle back to next cast
                 fishingState = FishingState::Casting;
                 fishingStateStartTime = currentMillis;
+                if (fishingArmed)
+                {
+                    usb_hid_keyboard_enqueue(FISHING_KEY_CAST);
+                }
             }
             break;
         }
@@ -257,35 +306,44 @@ void fishing_render()
     // State Pill
     if (fishingState == FishingState::Stopped)
     {
-        fishing_display.fillRoundRect(164, 4, 60, 18, 2, COLOR_PILL_STOPPED);
+        fishing_display.fillRoundRect(164, 4, 56, 18, 2, COLOR_PILL_STOPPED);
         fishing_display.setTextColor(TFT_LIGHTGREY);
-        fishing_display.setCursor(170, 7);
+        fishing_display.setCursor(168, 7);
         fishing_display.print("STOPPED");
     }
     else if (fishingState == FishingState::Paused)
     {
-        fishing_display.fillRoundRect(164, 4, 56, 18, 2, COLOR_PILL_PAUSED);
+        fishing_display.fillRoundRect(164, 4, 54, 18, 2, COLOR_PILL_PAUSED);
         fishing_display.setTextColor(TFT_YELLOW);
-        fishing_display.setCursor(172, 7);
+        fishing_display.setCursor(170, 7);
         fishing_display.print("PAUSED");
     }
     else
     {
-        fishing_display.fillRoundRect(164, 4, 62, 18, 2, COLOR_PILL_RUNNING);
+        fishing_display.fillRoundRect(164, 4, 56, 18, 2, COLOR_PILL_RUNNING);
         fishing_display.setTextColor(TFT_GREEN);
-        fishing_display.setCursor(170, 7);
+        fishing_display.setCursor(168, 7);
         fishing_display.print("RUNNING");
     }
 
-    // Explicit Hardware Status Flag
-    fishing_display.setTextColor(TFT_ORANGE);
-    fishing_display.setCursor(232, 7);
-    fishing_display.print("USB: UNAVAIL");
+    // Explicit Hardware / USB Status Flag (checks actual host-mounted state)
+    if (usb_hid_is_connected())
+    {
+        fishing_display.setTextColor(COLOR_BORDER_BRIGHT);
+        fishing_display.setCursor(224, 7);
+        fishing_display.print("USB: MOUNTED");
+    }
+    else
+    {
+        fishing_display.setTextColor(TFT_ORANGE);
+        fishing_display.setCursor(224, 7);
+        fishing_display.print("USB: DISCONN");
+    }
 
     // =========================================================================
     // 2. Telemetry Cards (y: 26, height: 75)
     // =========================================================================
-    // Left Card: Simulated Reel Count & Timeouts
+    // Left Card: Simulated Reel Count & Timeouts / Keys
     fishing_display.fillRoundRect(2, 26, 156, 75, 3, COLOR_PANEL_BG);
     fishing_display.drawRoundRect(2, 26, 156, 75, 3, COLOR_BORDER);
 
@@ -305,8 +363,8 @@ void fishing_render()
     fishing_display.setCursor(8, 72);
     fishing_display.print("Simulated (no catch data)");
 
-    char timeoutBuf[24];
-    std::snprintf(timeoutBuf, sizeof(timeoutBuf), "Timeouts: %u", fishingSimTimeouts);
+    char timeoutBuf[32];
+    std::snprintf(timeoutBuf, sizeof(timeoutBuf), "TO: %u | Live: %u", fishingSimTimeouts, fishingLiveKeySentCount);
     fishing_display.setTextColor(COLOR_TEXT_DIM);
     fishing_display.setCursor(8, 85);
     fishing_display.print(timeoutBuf);
@@ -391,9 +449,24 @@ void fishing_render()
     fishing_display.print(upBuf);
 
     // USB Physical States Explicit Notice
-    fishing_display.setTextColor(TFT_RED);
-    fishing_display.setCursor(168, 77);
-    fishing_display.print("USB HID: NO KEYSTROKES");
+    if (!usb_hid_is_connected())
+    {
+        fishing_display.setTextColor(0x7BEF);  // Dim slate grey
+        fishing_display.setCursor(168, 77);
+        fishing_display.print("HID: UNAVAILABLE");
+    }
+    else if (!fishingArmed)
+    {
+        fishing_display.setTextColor(TFT_LIGHTGREY);
+        fishing_display.setCursor(168, 77);
+        fishing_display.print("HID: DISARMED (SAFE)");
+    }
+    else
+    {
+        fishing_display.setTextColor(TFT_RED);
+        fishing_display.setCursor(168, 77);
+        fishing_display.print("HID: ARMED [KEYS ON]");
+    }
 
     fishing_display.setTextColor(0x7BEF);  // Darker grey
     fishing_display.setCursor(168, 88);
@@ -406,13 +479,20 @@ void fishing_render()
     fishing_display.drawRoundRect(2, 103, 316, 49, 3, COLOR_BORDER);
 
     // Audio Section Header
-    char audioBuf[48];
+    char audioBuf[50];
     const int audioPct = static_cast<int>(fishingSimAudioLevel * 100.0f);
     const int threshPct = static_cast<int>(fishingSimAudioThreshold * 100.0f);
-    std::snprintf(audioBuf, sizeof(audioBuf), "SIM AUDIO: %d%%  THRESH: %d%% (SYNTHETIC)",
-                  audioPct, threshPct);
+    if (fishingArmed && usb_hid_is_connected())
+    {
+        std::snprintf(audioBuf, sizeof(audioBuf), "AUDIO: %d%% / %d%% [ARMED-LIVE]", audioPct, threshPct);
+        fishing_display.setTextColor(TFT_YELLOW);
+    }
+    else
+    {
+        std::snprintf(audioBuf, sizeof(audioBuf), "SIM AUDIO: %d%%  THRESH: %d%% (SYNTH)", audioPct, threshPct);
+        fishing_display.setTextColor(TFT_WHITE);
+    }
 
-    fishing_display.setTextColor(TFT_WHITE);
     fishing_display.setCursor(8, 108);
     fishing_display.print(audioBuf);
 
@@ -455,16 +535,24 @@ void fishing_render()
     // 4. Footer Hint Bar (y: 156, height: 12)
     // =========================================================================
     fishing_display.setTextColor(COLOR_TEXT_DIM);
-    fishing_display.setCursor(14, 157);
-    fishing_display.print("HOLD UP: Start/Pause");
+    fishing_display.setCursor(6, 157);
+    fishing_display.print("UP: Run/Pause");
 
     fishing_display.setTextColor(TFT_WHITE);
-    fishing_display.setCursor(154, 157);
+    fishing_display.setCursor(92, 157);
     fishing_display.print("|");
 
     fishing_display.setTextColor(COLOR_TEXT_DIM);
-    fishing_display.setCursor(168, 157);
-    fishing_display.print("HOLD DOWN: Stop/Reset");
+    fishing_display.setCursor(102, 157);
+    fishing_display.print("DOWN: Stop");
+
+    fishing_display.setTextColor(TFT_WHITE);
+    fishing_display.setCursor(176, 157);
+    fishing_display.print("|");
+
+    fishing_display.setTextColor((fishingArmed && usb_hid_is_connected()) ? TFT_RED : COLOR_TEXT_DIM);
+    fishing_display.setCursor(186, 157);
+    fishing_display.print("BOTH: Arm/Disarm");
 
     // Push composite frame to LCD (single DMA/parallel block transfer - zero flicker)
     fishing_display.pushSprite(0, 0);

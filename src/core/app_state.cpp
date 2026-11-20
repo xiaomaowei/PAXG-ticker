@@ -17,6 +17,8 @@ float fishingSimAudioThreshold = 0.75f;
 bool fishingAudioDetected = false;
 unsigned long fishingNextBiteDelayMs = 0;
 unsigned long fishingWaitMaxMs = 20000UL;
+bool fishingArmed = false;
+unsigned int fishingLiveKeySentCount = 0;
 
 int angle = 0;
 int angleMax = 30;

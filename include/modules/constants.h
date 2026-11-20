@@ -21,4 +21,11 @@ constexpr unsigned long FISHING_SIM_TICK_INTERVAL = 50UL;  // fishing sim logic 
 constexpr unsigned long ROTATION_INTERVAL = 15UL;          // PAXG badge rotation speed
 constexpr int HOLD_TIME = 1000;                            // time needed to hold the button
 constexpr unsigned long BUTTON_LONG_PRESS_MS = 800UL;      // long press duration threshold for mode gestures
-constexpr unsigned long MODE_SWITCH_DEBOUNCE_MS = 50UL;   // contact bounce filter for mode switching
+constexpr unsigned long MODE_SWITCH_DEBOUNCE_MS = 50UL;    // contact bounce filter for mode switching
+
+// Fishing HID Keyboard configurable key constants (safe placeholders)
+constexpr uint8_t FISHING_KEY_CAST = '1';                  // Placeholder cast key
+constexpr uint8_t FISHING_KEY_INTERACT = '2';              // Placeholder interact / reel key
+constexpr unsigned long FISHING_KEY_PRESS_HOLD_MS = 60UL;  // Duration to hold key pressed across ticks
+constexpr unsigned long FISHING_KEY_RELEASE_GAP_MS = 60UL; // Cooldown gap after release before next key
+constexpr size_t FISHING_KEY_QUEUE_CAPACITY = 8;           // Bounded command queue depth

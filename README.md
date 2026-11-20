@@ -8,7 +8,7 @@ PAXG-ticker is an ESP32 firmware project for the LILYGO T-Display S3. The device
 - Animated PAXG mode with chart and session panel
 - Digital clock mode
 - Weather mode
-- Simulated WoW Fishing mode (Phase 2 dashboard & nonblocking state machine)
+- WoW Fishing mode with Phase 3 minimal standard USB HID Keyboard integration (stock Arduino `USBHIDKeyboard`, bounded nonblocking queue, thread-safe asynchronous disconnect signaling, explicit safety arming gates)
 - Button-based mode switching with gesture affordances
 
 ## Market Data Source
@@ -47,18 +47,19 @@ Tip: Click any image to open the full-size version.
 ## Tech Stack
 
 - PlatformIO
-- Arduino framework (ESP32)
+- Arduino framework (ESP32 2.0.14)
 - TFT_eSPI
 - ArduinoJson
 - HTTPClient
+- Stock USB / TinyUSB (`USBHIDKeyboard`)
 
 ## Repository Layout
 
-- [src/core](src/core): app loop/controller and shared runtime globals
+- [src/core](src/core): app loop/controller, USB HID keyboard service, and shared runtime globals
 - [src/modes](src/modes): mode implementations (paxg, clock, weather, fishing)
 - [src/hal](src/hal): hardware-facing modules (display, wifi, brightness, ui utils)
 - [include/modules/modes](include/modules/modes): canonical mode headers
-- [include/modules/hal](include/modules/hal): canonical HAL headers
+- [include/modules/hal](include/modules/hal): canonical HAL headers (`usb_hid_keyboard.h`, etc.)
 - [include/modules/generated](include/modules/generated): auto-generated headers
 - [include/modules](include/modules): shared non-domain headers
 - [include/images](include/images): embedded graphics assets
@@ -66,24 +67,33 @@ Tip: Click any image to open the full-size version.
 - [scripts/load_env.py](scripts/load_env.py): pre-build .env loader
 - [platformio.ini](platformio.ini): PlatformIO build configuration
 
-## WoW Fishing Mode (Phase 1 & Phase 2)
+## WoW Fishing Mode (Phases 1, 2 & 3)
 
-A 4th display mode, **WoW Fishing (Simulation)**, provides a nonblocking simulated dashboard with dark cyan/navy telemetry, synthetic audio detector test data, and dedicated button gestures.
+The 4th display mode, **WoW Fishing**, provides a nonblocking state machine dashboard with dark cyan/navy telemetry, synthetic audio detector test patterns, and safe standard USB HID Keyboard integration.
 
 ### Phases Overview
 
 - **Phase 1 (Feasibility & Architecture)**:
   - Technical analysis of the ESP32-S3 USB subsystem under PlatformIO and Arduino ESP32 2.0.14.
-  - Verified USB HID feasibility (via TinyUSB) while qualifying USB Audio status: current Arduino 2.0.14 setup has no demonstrated ready-to-use UAC speaker capture path or configuration in this project, and the proposed route is unverified.
-  - Noted that a minimal TinyUSB/ESP-IDF compatibility proof is required before concluding feasibility or considering migration (avoiding categorical platform-wide impossibility claims solely from missing configuration macros).
+  - Identified stock `USBHIDKeyboard` component and qualified USB Audio (UAC) status: precompiled sdkconfig omits `CONFIG_TINYUSB_AUDIO_ENABLED`, requiring a minimal TinyUSB/ESP-IDF proof of concept before concluding feasibility or considering framework migration.
   - Detailed findings documented in [docs/usb_feasibility.md](docs/usb_feasibility.md).
 - **Phase 2 (Simulated Dashboard & State Machine)**:
   - Nonblocking state machine: `STOPPED` -> `CASTING` -> `WAITING BITE` -> `REELING`.
-  - Synthetic audio test data simulating ambient water noise floor (~15-25%) with scheduled bite spike events (~85-95%) crossing the 75% threshold.
+  - Synthetic audio test data simulating ambient water noise floor (~12-30%) with scheduled bite spike events (~82-97%) crossing the 75% threshold.
   - Low-flicker 320x170 rendering using `fishing_display` sprite.
-  - Compatible button gesture system preserving global mode navigation.
+  - In-mode button gestures preserving global mode navigation.
+- **Phase 3 (Minimal Standard USB HID Keyboard & Safe Integration)**:
+  - **Stock USBHIDKeyboard**: Uses stock Arduino `USBHIDKeyboard` standard reports; no custom VID/PID, hidden descriptors, evasion, or anticheat modifications.
+  - **Bounded Nonblocking Command Queue**: Depth-bounded queue (`FISHING_KEY_QUEUE_CAPACITY = 8`) ensuring key press and release happen on separate service ticks (`FISHING_KEY_PRESS_HOLD_MS = 60ms`, `FISHING_KEY_RELEASE_GAP_MS = 60ms`).
+  - **Thread-Safe Disconnect Signaling**: `usb_event_callback` does not mutate queue or call `releaseAll()` directly across FreeRTOS tasks; it sets a synchronized `std::atomic<bool> s_pendingDisconnect` signal.
+  - **Loop Task Consumption & Auto-Disarm**: Pending disconnect/suspend signal is consumed in `usb_hid_keyboard_tick` on the Arduino main loop, immediately clearing the queue, calling `Keyboard.releaseAll()`, and forcing `fishingArmed = false` (auto-disarm). This prevents automated key transmission if the device is reconnected.
+  - **Host-Mounted Gating**: Enqueue and sending strictly gate on actual host-mounted state (`_started && tinyusb_device_mounted` via `usb_hid_is_connected()`); USB initialization alone is not treated as a connected host. Unmounted state displays `USB: DISCONN` and `HID: UNAVAILABLE`.
+  - **Re-arm Protection**: USB reconnect or resume events do not re-arm the device; explicit user dual-button action is required.
+  - **Strict State Gating**: Keystrokes are gated behind `DisplayMode::Fishing` **AND** `usb_hid_is_connected()` **AND** an explicit user armed state (`fishingArmed`) **AND** an active running state (`Casting`, `WaitingBite`, `Reeling`).
+  - **Zero Leakage**: No keystrokes can ever be transmitted in `PAXG`, `Clock`, `Weather`, `Stopped`, or `Paused` modes.
+  - **Configurable Safe Placeholders**: Cast key (`'1'`) and Interact key (`'2'`) constants configured in `constants.h`.
 - **Phase 4 / Future Work**:
-  - Real audio capture and USB keystroke automation remain **explicitly unimplemented and unverified**.
+  - Real game automation, physical USB Audio (UAC) capture, and Windows composite host verification remain **explicitly unimplemented and unverified**.
 
 ### Button Controls & Gesture Navigation
 
@@ -95,20 +105,24 @@ The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):
 | **Short Press DOWN (< 800ms)** | All modes (on release) | Cycle mode backward: `PAXG -> Fishing -> Weather -> Clock -> PAXG` |
 | **Long Press UP (Hold >= 800ms)** | Fishing Mode only | **Toggle Start / Pause / Resume** simulation |
 | **Long Press DOWN (Hold >= 800ms)** | Fishing Mode only | **Stop** simulation (1st hold) / **Reset** counters (2nd hold) |
+| **Hold Both Buttons (>= 800ms)** | Fishing Mode only | **Toggle Armed / Disarmed** (Enables/disables live HID keystrokes, requires mounted host) |
 
-#### Debounce and Release Behavior
+#### Debounce, Safety, and Release Behavior
 - **Debounce**: 50ms contact debounce filter applied to both button inputs to eliminate chatter.
 - **Release-Triggered Navigation**: Short-press mode cycling triggers strictly on button release if the press duration was under 800ms and no long-press action fired.
-- **Long-Press Protection**: In Fishing mode, holding for >= 800ms fires the start/pause or stop action immediately and sets an internal flag so that releasing the button does not trigger a mode cycle.
+- **Long-Press Protection**: In Fishing mode, holding for >= 800ms fires the start/pause, stop, or arm/disarm action immediately and sets an internal flag so that releasing the button does not trigger a mode cycle.
+- **Auto-Disarm on Exit & Disconnect**: Leaving Fishing mode or unplugging/suspending USB immediately sets `fishingArmed = false`, flushes any pending queued keys, and calls `Keyboard.releaseAll()`.
 - **Setup Isolation**: Wi-Fi selection and keyboard input routines in `src/hal/utils.cpp` execute inside `app_setup()` prior to `app_loop()` and do not interact with runtime mode switching.
 
 ### USB Feasibility Status & Disclaimers
 
-- **USB HID**: Feasible for Phase 3 via TinyUSB, but currently **unimplemented and disabled** in Phase 2.
-- **USB Audio (UAC)**: Current Arduino 2.0.14 setup has no demonstrated ready-to-use UAC speaker capture path or configuration in this project; this route is unverified, and a minimal TinyUSB/ESP-IDF compatibility proof is required before concluding feasibility or migrating.
-- **Phase 4 Status**: Real audio detection and hardware USB automation are explicitly unimplemented and unverified.
-- **Simulation Notice**: All reel counts are clearly labeled `Sim Reel Cmds` (simulated command counts, not confirmed catch telemetry). All audio metrics are synthetic test patterns.
-- **Known Limitations**: Firmware behavior has been verified via clean PlatformIO compilation; no live physical hardware or Windows host validation is claimed.
+- **What Was Tested**: Successful compilation and clean firmware linking with PlatformIO for target `lilygo-t-display-s3` (ESP32-S3), verifying stock `USBHIDKeyboard` integration, thread-safe disconnect consumption, bounded command queue state transitions, separate service tick press/release pairing, and strict gating logic.
+- **What Remains Unverified**:
+  - Physical execution on hardware: Local ESP32-S3 physical device validation was unavailable.
+  - Windows 11 host USB composite driver enumeration and keystroke delivery across Windows USB hubs.
+  - Game interaction: Keys `'1'` and `'2'` are safe placeholder constants and do not claim verified gameplay automation.
+  - USB Audio Class (UAC): Remains completely unverified and unimplemented.
+- **Simulation Notice**: Reel counts are labeled `SIM REEL CMDS` (simulated command counts, not confirmed catch telemetry). All audio metrics are synthetic test patterns.
 
 ## Requirements
 
@@ -177,7 +191,7 @@ Primary build target is defined in [platformio.ini](platformio.ini):
 
 - Environment: lilygo-t-display-s3
 - Framework: arduino
-- Dependencies: TFT_eSPI, WiFi, ArduinoJson, HTTPClient
+- Dependencies: TFT_eSPI, WiFi, ArduinoJson, HTTPClient, USB
 
 ## Troubleshooting
 
