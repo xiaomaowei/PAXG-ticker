@@ -8,11 +8,18 @@ Key conclusions:
 1. **USB HID (Keyboard Keystroke Output)**: **Implemented in Phase 3**. The stock Espressif Arduino component (`USBHIDKeyboard`) provides standard keyboard HID reports with standard USB descriptors (no custom VID/PID, hidden descriptors, evasion, or anticheat modifications). Initialized at boot alongside USB CDC via `keyboard.begin()` and `USB.begin()`.
 2. **Command Queue, Host-Mounted Gating & State Guards**: Implemented via a bounded nonblocking circular queue (`FISHING_KEY_QUEUE_CAPACITY = 8`). Press and release actions are strictly separated across independent service ticks (`FISHING_KEY_PRESS_HOLD_MS = 60ms`, `FISHING_KEY_RELEASE_GAP_MS = 60ms`). All keystroke transmission and arming are strictly gated behind actual host-mounted state (`_started && tinyusb_device_mounted`), Fishing mode, an active running state, and an explicit user armed flag (`fishingArmed`, toggled by holding both buttons).
 3. **Thread-Safe Disconnect & Auto-Disarm**: Asynchronous disconnect/suspend events from the USB event task set a synchronized `std::atomic<bool> s_pendingDisconnect` signal without mutating state directly across threads. The signal is consumed in `usb_hid_keyboard_tick` on the Arduino main loop, immediately clearing the queue, calling `Keyboard.releaseAll()`, and auto-disarming (`fishingArmed = false`), preventing automated key sends upon reconnect. Reconnect and resume events do not re-arm the device.
-4. **USB Audio Class (UAC 1.0 / 2.0 Feasibility Proof)**: **Phase 4 Completed as Isolated Feasibility Proof; Production UAC Unverified and Not Implemented**. An isolated compile/link proof of concept (`test/usb_audio_poc/**`) verified that while TinyUSB audio class headers (`class/audio/audio_device.h`) compile cleanly when driver macros are provided, linking against the stock framework static library fails with `undefined reference to tud_audio_n_read`. Direct binary analysis confirms that `libarduino_tinyusb.a` contains zero `tud_audio*` symbols, `audio_device.c` is not packaged in the installed framework, and `CONFIG_TINYUSB_AUDIO_ENABLED` is omitted from the precompiled sdkconfig. This is a framework packaging and static library configuration limitation, not a hardware impossibility claim. Because support is not demonstrable without framework migration or rebuilding ESP-IDF static libraries, Phase 4 is explicitly maintained as **not implemented / unverified in production firmware**, and no UAC code enters production builds.
+4. **USB Audio Class (UAC 1.0 / 2.0 Feasibility Proof)**:
+   - **Production Firmware (Arduino ESP32 2.0.14 / ESP-IDF 4.4.6)**: **Unverified and Not Implemented**. An isolated compile/link proof of concept (`test/usb_audio_poc/**`) verified that while TinyUSB audio class headers compile cleanly, linking fails with `undefined reference to tud_audio_n_read`. Direct binary analysis confirms `libarduino_tinyusb.a` contains zero `tud_audio*` symbols and `audio_device.c` is omitted. No UAC code enters production builds.
+   - **Isolated ESP-IDF >= 5.0 Proof (`test/usb_audio_poc_idf/**`)**: **Feasibility Confirmed**. Using Espressif's official `esp_device_uac` (`espressif/usb_device_uac` v1.3.2) on ESP-IDF `v5.1.2`, an isolated PlatformIO project compiles and links cleanly (`firmware.elf`, exit code 0). The public API `uac_device_init` and non-codec PCM counting callback `uac_speaker_output_cb` successfully link against `tud_audio_n_read` and TinyUSB audio ISRs. This confirms that UAC is functionally supported on ESP32-S3 under ESP-IDF >= 5.0, while production firmware remains strictly untouched.
 5. **Modular PCM Audio Detector**: **Implemented in Phase 5**. A platform-independent, replaceable audio detection engine (`IAudioDetector` / `PcmAudioDetector`) processes PCM16 mono frames with bounded ring buffering (`PcmRingBuffer`), Peak, Root Mean Square (RMS), adaptive ambient noise floor tracking (EMA), dynamic thresholding, debounce confirmation, and cooldown lockout gating. Deterministic synthetic test patterns verify normal burst detection, noise spike debounce rejection, and cooldown gating.
 6. **Synthetic PCM Loop, 9-State FSM & Multi-Page UI**: **Implemented in Phase 6**. The detector is connected to an in-engine bounded synthetic PCM source (128 samples per tick) generating baseline ambient noise (~250 RMS) with scheduled bursts (~6000 RMS). The state machine implements 9 explicit nonblocking states (`IDLE`, `CASTING`, `WAITING`, `BITE_DETECTED`, `REELING`, `COOLDOWN`, `TIMEOUT`, `PAUSED`, `ERROR`) timed via `millis()`. Three 320x170 UI pages (Dashboard, Audio Monitor, Settings) render into the `fishing_display` sprite without LCD flicker.
 7. **Persistent Settings & Conflict-Free Controls**: **Implemented in Phase 7**. Parameters (`absoluteThreshold`, `waitTimeoutMs`, `cooldownMs`, `castKey`, `interactKey`) persist in Arduino Preferences (NVS namespace `paxg_fishing`) with boundary clamping. Physical button controls provide mutually exclusive long/short press handling, safe exit, and dual-button arming.
-8. **Validation Scope**: Local verification consists of clean PlatformIO compilation and linking for `lilygo-t-display-s3` (ESP32-S3), static cross-compilation of unit tests and isolated PoC with `xtensa-esp32s3-elf-g++`, and symbol verification. Physical hardware execution on an ESP32-S3 board, Windows 11 host composite driver enumeration, and in-game WoW bite detection accuracy remain unavailable and are explicitly disclaimed.
+8. **Validation Scope & Physical Hardware Observation**:
+   - **Verified on Physical Hardware**: Production firmware build, flash upload via `pio run -t upload --upload-port COM3` (ESP32-S3 rev v0.2, MAC `80:65:99:C6:3A:94`, VID:PID `303A:1001`), and serial boot startup (`PAXG ticker starting up` captured via monitor on COM3).
+   - **Core Dump Notice**: Serial boot logged `E (221) esp_core_dump_flash: Incorrect size of core dump image: 1785838705` (recorded verbatim; not categorized as harmless).
+   - **Windows 11 Host HID Enumeration**: On Windows 11 Pro (version 10.0.26200, build 26200), `Get-PnpDevice -PresentOnly` confirmed `Keyboard / HID Keyboard Device` (`HID\VID_303A&PID_1001\6&C30D08&0&0000`, OK) and `HIDClass / USB 輸入裝置` (`USB\VID_303A&PID_1001\806599C63A94`, OK), confirming Windows HID enumeration only. No keystroke was sent and HID key delivery was not tested.
+   - **Remaining Unverified**: Screen appearance/backlight (TFT LCD), Wi-Fi/data freshness, UAC hardware/Windows audio enumeration/capture, and in-game bite recognition remain unverified.
+   - **UAC PoC Boundary**: The isolated ESP-IDF UAC PoC was compiled and linked cleanly, but was **NOT flashed** to the physical board. Production Arduino firmware remains strictly untouched.
 
 ---
 
@@ -38,6 +45,48 @@ Inspection of the local PlatformIO environment and resolved package versions rev
   - `-DARDUINO_USB_MODE=1`
   - `-DARDUINO_USB_CDC_ON_BOOT=1`
 - Compiling `USBHIDKeyboard` and `USB.h` with the stock PlatformIO LDF automatically locates `framework-arduinoespressif32/libraries/USB` (`libUSB.a`), successfully building without requiring modifications to `platformio.ini`.
+
+### 1.1 Production Build & Physical Target Hardware Evidence (COM3)
+
+Local execution and physical hardware observation on a connected device yielded the following empirical evidence:
+
+1. **Production Build (`pio run`)**:
+   - **Framework**: PlatformIO Arduino ESP32 `2.0.14` (ESP-IDF `v4.4.6`)
+   - **Resource Utilization**:
+     - RAM: `83,348 / 327,680 bytes` (25.4%)
+     - Flash: `1,121,797 / 6,553,600 bytes` (17.1%)
+   - **Result**: Successful compilation and linkage (`firmware.elf`).
+
+2. **Target Flashing via esptool (`pio run -t upload --upload-port COM3`)**:
+   - **Port & Hardware Identity**: `COM3`, Espressif USB VID:PID `303A:1001`, PNP serial `80:65:99:C6:3A:94`.
+   - **Chip Detected**: ESP32-S3 (revision v0.2), MAC Address: `80:65:99:C6:3A:94`.
+   - **Verification**: All bootloader, partition table, and application SHA-256 hashes verified on-chip.
+   - **Flash Operation**: Application successfully written at offset `0x10000`, followed by a hardware reset via RTS.
+
+3. **Serial Monitor Boot Capture (`pio device monitor -p COM3 -b 115200`)**:
+   - Following manual DTR toggle, the monitor captured ROM bootloader output and the application banner:
+     ```
+     PAXG ticker starting up
+     ```
+   - Confirmed application initialization and entry into main task execution.
+   - **Core Dump Warning**: During boot initialization, the ESP-IDF flash partition component reported:
+     ```
+     E (221) esp_core_dump_flash: Incorrect size of core dump image: 1785838705
+     ```
+     *Note*: This error indicates that the core dump partition header contains an invalid image size value (`1785838705`, hex `0x6A706771`). This warning is recorded verbatim as an observed hardware runtime diagnostic and is not dismissed as harmless.
+
+4. **Windows 11 Host HID Enumeration (`Get-PnpDevice`)**:
+   - **Host Environment**: Windows 11 Pro, version `10.0.26200`, build `26200`.
+   - **PnP Device Discovery**: `Get-PnpDevice -PresentOnly` successfully lists both HID interfaces from the connected ESP32-S3 board:
+     - `Keyboard / HID Keyboard Device`: Instance ID `HID\VID_303A&PID_1001\6&C30D08&0&0000`, Status `OK`.
+     - `HIDClass / USB 輸入裝置`: Instance ID `USB\VID_303A&PID_1001\806599C63A94`, Status `OK`.
+   - **Hardware Correlation**: The instance serial `806599C63A94` matches the ESP32-S3 MAC/USB serial observed during esptool flash upload (`80:65:99:C6:3A:94`).
+   - **Boundary**: This evidence confirms Windows OS-level HID composite device enumeration only. No keystroke was sent and HID key delivery was not tested.
+
+5. **Strict Scope Separation**:
+   - **Verified on Hardware / Host**: Production firmware build, flash programming, serial console boot, and Windows 11 HID device enumeration (`OK`).
+   - **Unverified on Hardware / Host**: Physical LCD screen appearance/backlight, Wi-Fi connectivity and real-time data freshness, HID keystroke delivery to host applications, UAC audio device enumeration/streaming/capture, and WoW in-game bite detection.
+   - **UAC PoC Flashing Status**: The isolated ESP-IDF UAC proof (`test/usb_audio_poc_idf/`) was compiled and linked to verify driver symbols, but was **NOT flashed** to the physical board. Production Arduino firmware remains deployed without modification.
 
 ---
 
@@ -224,6 +273,63 @@ PoC Link output (showing unresolved references to tud_audio_*):
 - **Strict Guarding**: UAC cannot link or function under the current framework without rebuilding ESP-IDF static libraries or performing an unverified framework migration.
 - **Reporting Status**: As mandated, Phase 4 is explicitly reported as **not implemented and unverified in production firmware**. No UAC code is linked into the production binary.
 
+### 6.6 Phase 4.1 Isolated ESP-IDF >= 5.0 Official esp_device_uac Feasibility Proof
+
+To empirically test whether ESP32-S3 hardware supports native USB Audio Class under supported toolchains, an isolated PlatformIO ESP-IDF project was implemented in [test/usb_audio_poc_idf/](test/usb_audio_poc_idf/):
+
+1. **Environment Configuration**:
+   - **PlatformIO Core**: `6.1.19`
+   - **Platform**: `espressif32 @ 6.5.0`
+   - **Framework**: `framework-espidf @ 3.50102.240122` (ESP-IDF `v5.1.2`)
+   - **Toolchain**: `toolchain-xtensa-esp32s3 @ 12.2.0+20230208` (GCC 12.2.0)
+   - **Component**: Espressif official `esp_device_uac` (`espressif/usb_device_uac` v1.3.2)
+   - **TinyUSB Stack**: `espressif/tinyusb` (v0.19.0~3) compiled directly from source with `audio_device.c`
+
+2. **Public C API & No-Codec PCM Callback**:
+   Uses the official public API from `usb_device_uac.h`:
+   ```c
+   uac_device_config_t uac_config = {
+       .skip_tinyusb_init = false,
+       .output_cb = uac_speaker_output_cb, // Speaker playback (Host PC -> ESP32-S3)
+       .input_cb = NULL,                  // Output-only speaker; microphone not needed
+       .set_mute_cb = NULL,
+       .set_volume_cb = NULL,
+       .cb_ctx = &s_poc_stats,
+   };
+   ESP_ERROR_CHECK(uac_device_init(&uac_config));
+   ```
+   The registered callback `uac_speaker_output_cb` processes isochronous OUT packets, tracking received packet counts, raw byte counts, and 16-bit PCM sample counts without requiring external audio codec hardware.
+
+3. **Empirical Compilation and Linkage Evidence**:
+   ```powershell
+   pio run -d test/usb_audio_poc_idf
+   ```
+   - **Exit Code**: `0`
+   - **RAM Usage**: `15,968 bytes` (~4.9% of 320 KB)
+   - **Flash Usage**: `227,189 bytes` (~21.7% of 1 MB app partition)
+   - **Artifacts**: `test/usb_audio_poc_idf/.pio/build/esp32s3_uac_poc/firmware.elf` and `firmware.bin`
+
+4. **Resolved Symbols via Binary Inspection (`xtensa-esp32s3-elf-nm`)**:
+   Binary analysis confirms that all symbols missing under the stock Arduino static library are fully resolved in the ESP-IDF binary:
+   - `42001b40 T uac_device_init`
+   - `420027d0 T tud_audio_n_read`
+   - `4200284c T tud_audio_n_write`
+   - `42001a38 T tud_audio_rx_done_isr`
+   - `420013cc t uac_speaker_output_cb`
+
+5. **Automated Verification Harness**:
+   The validation script [test/usb_audio_poc_idf/run_validation.py](test/usb_audio_poc_idf/run_validation.py) automates the end-to-end check:
+   - Asserts isolated build succeeds (`returncode == 0`).
+   - Asserts `firmware.elf` and `firmware.bin` are generated.
+   - Inspects and asserts all four critical UAC symbols are present and resolved.
+   - Asserts production firmware builds cleanly (`pio run`, `returncode == 0`).
+
+6. **Scope Boundaries & Clear Separation of Concerns**:
+   - **Firmware Compilation & Link**: **VERIFIED**. The ESP-IDF toolchain and official Espressif UAC driver successfully compile and link.
+   - **Physical Hardware Execution**: **UNVERIFIED**. Flashing to a physical ESP32-S3 board was not performed.
+   - **Windows 11 Composite Enumeration**: **UNVERIFIED**. Host enumeration of composite CDC + HID + UAC endpoints remains unverified on real Windows hosts.
+   - **Production Isolation**: Production firmware remains strictly on Arduino ESP32 2.0.14 without UAC integration.
+
 ---
 
 ## 7. Phase 5 Modular PCM Audio Detector & Synthetic Verification
@@ -368,19 +474,24 @@ Settings are saved under NVS namespace `paxg_fishing`:
 
 | Verification Item | Phase | Status | Evidence / Notes |
 | :--- | :--- | :--- | :--- |
-| **Production Firmware Build** | 1-7 | **VERIFIED** | PlatformIO `pio run` builds cleanly; `firmware.elf` linked successfully. |
-| **USB HID Keyboard Gating** | 3-7 | **VERIFIED** | Guarded on mounted host, Fishing mode, armed flag, active running state. |
-| **Auto-Disarm on Disconnect** | 3-7 | **VERIFIED** | Thread-safe atomic disconnect signal auto-disarms and transitions to Error. |
+| **Production Firmware Build** | 1-7 | **VERIFIED** | PlatformIO `pio run` succeeded (RAM 83,348/327,680, Flash 1,121,797/6,553,600). |
+| **Board Flash Upload (COM3)** | 1-7 | **VERIFIED** | `pio run -t upload --upload-port COM3` wrote app at 0x10000; ESP32-S3 rev v0.2, MAC 80:65:99:C6:3A:94; hashes verified. |
+| **Board Serial Startup (COM3)**| 1-7 | **VERIFIED** | `pio device monitor` captured ROM boot & `PAXG ticker starting up`; logged `E (221) esp_core_dump_flash: Incorrect size of core dump image: 1785838705`. |
+| **Screen Appearance (TFT LCD)**| 1-7 | **UNVERIFIED** | Physical display image / backlight not visually verified in this session. |
+| **Wi-Fi / Data Freshness**     | 1-7 | **UNVERIFIED** | Real-time network connection, NTP sync, and live price/weather refresh unverified. |
+| **Windows HID Enumeration**    | 3-7 | **VERIFIED** | Windows 11 Pro (build 26200): `Get-PnpDevice` listed `HID Keyboard Device` (`HID\VID_303A&PID_1001\...`, OK) and `USB 輸入裝置` (`USB\VID_303A&PID_1001\806599C63A94`, OK). |
+| **HID Keystroke Delivery**     | 3-7 | **UNVERIFIED** | No keystroke was sent; delivery to host applications not tested. |
 | **Audio Detector Ring Buffer** | 5-7 | **VERIFIED** | Bounded zero-allocation FIFO; bounds enforced; verified via tests. |
-| **RMS / Peak Calculation** | 5-7 | **VERIFIED** | Mathematical precision verified on known DC, silence, and square waves. |
-| **Debounce & Cooldown** | 5-7 | **VERIFIED** | 1-frame spikes rejected; secondary bursts in cooldown rejected. |
-| **FSM State Transitions** | 6-7 | **VERIFIED** | All 9 states tested: bite detection, timeout, pause/resume, error/disarm. |
-| **NVS Settings Persistence** | 7 | **VERIFIED** | Preferences NVS read/write; bounds clamped; defaults safe. |
-| **Conflict-Free Buttons** | 7 | **VERIFIED** | Long press at 800ms suppresses release; short press fires on release. |
-| **Multi-Page UI (320x170)** | 6-7 | **VERIFIED** | Dashboard, Audio Monitor, Settings fit 320x170 sprite; zero LCD flicker. |
-| **Isolated UAC Compilation** | 4 | **VERIFIED** | `test/usb_audio_poc/usb_audio_poc.cpp` compiles successfully with TinyUSB headers. |
-| **UAC Linkage Proof** | 4 | **VERIFIED LIMITATION** | Linking fails with `undefined reference to tud_audio_n_read` (`libarduino_tinyusb.a` lacks symbols). |
-| **Production UAC Isolation** | 4-7 | **VERIFIED** | UAC code is restricted to `test/usb_audio_poc/` and never enters production firmware. |
-| **Physical ESP32-S3 Hardware**| 1-7 | **UNVERIFIED** | Physical board execution not performed in this session. |
-| **Windows 11 Composite Enum** | 3-7 | **UNVERIFIED** | Windows host composite driver enumeration unverified. |
-| **In-Game Bite Recognition** | 5-7 | **UNVERIFIED** | Placeholder threshold algorithm; no claim of real WoW splash recognition. |
+| **RMS / Peak Calculation**     | 5-7 | **VERIFIED** | Mathematical precision verified on known DC, silence, and square waves. |
+| **Debounce & Cooldown**        | 5-7 | **VERIFIED** | 1-frame spikes rejected; secondary bursts in cooldown rejected. |
+| **FSM State Transitions**      | 6-7 | **VERIFIED** | All 9 states tested: bite detection, timeout, pause/resume, error/disarm. |
+| **NVS Settings Persistence**   | 7 | **VERIFIED** | Preferences NVS read/write; bounds clamped; defaults safe. |
+| **Conflict-Free Buttons**      | 7 | **VERIFIED** | Long press at 800ms suppresses release; short press fires on release. |
+| **Multi-Page UI (320x170)**    | 6-7 | **VERIFIED** | Dashboard, Audio Monitor, Settings fit 320x170 sprite; zero LCD flicker. |
+| **Isolated UAC Compilation**   | 4 | **VERIFIED** | `test/usb_audio_poc/usb_audio_poc.cpp` compiles successfully with TinyUSB headers. |
+| **UAC Linkage Proof**          | 4 | **VERIFIED LIMITATION** | Linking fails with `undefined reference to tud_audio_n_read` (`libarduino_tinyusb.a` lacks symbols). |
+| **Isolated ESP-IDF UAC Proof** | 4.1 | **VERIFIED** | `test/usb_audio_poc_idf`: ESP-IDF 5.1.2 + `esp_device_uac` links with `tud_audio*` symbols resolved (exit code 0). |
+| **Isolated UAC Hardware Flash**| 4.1 | **NOT FLASHED** | PoC binary was built to prove driver/symbol feasibility, but deliberately NOT flashed to board. |
+| **Production UAC Isolation**   | 4-7 | **VERIFIED** | UAC code is restricted to `test/usb_audio_poc/` and `test/usb_audio_poc_idf/`; never enters production firmware. |
+| **UAC HW / Windows Enum / Audio** | 4.1 | **UNVERIFIED** | Physical UAC USB audio capture and Windows audio device enumeration unverified. |
+| **In-Game Bite Recognition**   | 5-7 | **UNVERIFIED** | Placeholder threshold algorithm; no claim of real WoW splash recognition. |

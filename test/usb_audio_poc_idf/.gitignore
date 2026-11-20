@@ -1,0 +1,3 @@
+# Generated ESP-IDF project configuration
+sdkconfig.*
+!sdkconfig.defaults

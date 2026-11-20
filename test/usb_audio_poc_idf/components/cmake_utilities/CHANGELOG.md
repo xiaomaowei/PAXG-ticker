@@ -1,0 +1,129 @@
+## v1.4.1 - 2026-11-11
+
+* gen_custom_ota: the ddelta v3 header CRC covers the whole base firmware file, not the first 4KB. The bootloader rejects a mismatch before erasing the other app slot.
+
+## v1.4.0 - 2026-11-04
+
+* gen_custom_ota: add v3 ddelta packing (`-d ddelta -b base.bin`) via the `esp_ddelta` extension. Pure compression output is unchanged.
+* gen_custom_ota: optional `--pad_https_ota` (menuconfig `CU_OTA_PAD_HTTPS`) pads a packed image shorter than 1024 bytes so `esp_https_ota` can finish reading the image header. Off by default.
+* gen_diff_ota: `idf.py -DDIFF_OTA_NEW_FILE=<new> gen_diff_ota` builds the project, uses that binary as the base, and packs a ddelta image to the given new firmware.
+* gen_custom_ota: use an already installed `esp_ddelta` extension before the source tree next to the script. A managed copy that has not been built no longer hides a working install.
+* esp_ddelta: fix suffix-array search bounds after divsufsort. The previous call used en = oldsize and could read the uninitialized I[oldsize], which crashed encode under MALLOC_PERTURB_ or ASAN. Empty bases are handled without searching.
+
+## v1.3.0 - 2026-10-27
+
+* relinker: add IDF v5.1.x support
+* relinker: skip ESP-IDF 5.1 Wi-Fi and coexistence objects that are not part of the current build
+* relinker: use the IDF 5.1 mbedtls object path that matches v5.0 and v5.3
+
+## v1.2.0 - 2026-10-15
+
+* relinker: add optional `if_compiled` rules backed by CMake's compilation database, preserving compatibility with existing four-column CSV configurations.
+* relinker: support the ESP-IDF 5.3 Bluetooth/NimBLE memory layout change on ESP32-C3. Keep the old `bt_osi_mem_*` IRAM-strip rules when compiled, and use `nimble_mem_*` rules for newer builds.
+* relinker: add automated tests for both compilation layouts and low-speed mode.
+
+## v1.1.1 - 2025-02-25
+
+* relinker: some typo
+* relinker: add CI for relinker func
+* relinker: relinker.py:76: SyntaxWarning: invalid escape sequence '('
+* relinker: incorrect IDF_VERSION for IDF 5.0
+
+## v1.1.0 - 2025-01-16
+
+* relinker: support ESP32-C3 and SRAM optimization for flash-suspend
+* relinker: add IDF v5.3.x support
+
+## v0.5.3 - 2023-09-15
+
+* fix `add_dependencies called with incorrect number of arguments` in `relinker.cmake`
+* `include(cmake_utilities)` is not suggested now, to avoid cmake_utilities dependency issue
+
+## v0.5.2 - 2023-09-15
+
+* Support work on older ESP-IDF, eg: 4.3.x 
+
+## v0.5.1 - 2023-08-22
+
+* Add string 1-byte align support
+
+## v0.5.0 - 2023-08-02
+
+* Add GCC LTO support
+
+## v0.4.9 - 2023-7-26
+
+* gen_compressed_ota: Update the document to use the default V3 version compression format.
+
+## v0.4.8 - 2023-05-24
+
+* Add unit test app
+
+### Bugfix:
+
+* fix customer target redefinition issue
+
+## v0.4.7 - 2023-04-21
+
+* gen_compressed_ota: support the addition of a v2 compressed OTA header to compressed firmware.
+
+## v0.4.6 - 2023-04-20
+
+* relinker: add IDF v4.3.x support
+
+## v0.4.5 - 2023-04-17
+
+* gen_compressed_ota: remove slash use in gen_custom_ota.py so that the script can be used in the Windows cmd terminal.
+
+## v0.4.4 - 2023-04-07
+
+* relinker: suppressing the creation of `__pycache__`
+* relinker: support same name objects in one library
+
+## v0.4.3 - 2023-03-24
+
+* relinker: support decoding to get IRAM excluded libraries
+
+## v0.4.2 - 2023-03-20
+
+### Bugfix:
+
+* gen_compressed_ota: Fix the number of bytes reserved in the v3 compressed image header
+* gen_compressed_ota: Fix definition of MD5 length in compressed image header for different versions.
+
+## v0.4.1 - 2023-03-15
+
+* relinker: add option to use customized configuration files
+* relinker: add option to print error information instead of throwing exception when missing function
+* relinker: move functions of SPI flash from IRAM to flash only when enable CONFIG_SPI_FLASH_ROM_IMPL
+* relinker: move some functions of esp_timer from IRAM to flash only when disable CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD
+
+## v0.4.0 - 2023-03-13
+
+### Feature:
+
+* Add command `idf.py gen_single_bin` to generate merged bin file
+* Add command `idf.py flash_single_bin` to flash generated merged bin
+* Add config `Color in diagnostics` to control the GCC color output
+
+## v0.3.0 - 2023-03-10
+
+* Add gen_compressed_ota functionality, please refer to [gen_compressed_ota.md](https://github.com/espressif/esp-iot-solution/tree/master/tools/cmake_utilities/docs/gen_compressed_ota.md)
+
+## v0.2.1 - 2023-03-09
+
+### Bugfix:
+
+* package manager: Fix the compile issue when the name of the component has `-`, just like esp-xxx
+
+## v0.2.0 - 2023-02-23
+
+* Add relinker functionality, please refer to [relinker.md](https://github.com/espressif/esp-iot-solution/tree/master/tools/cmake_utilities/docs/relinker.md)
+
+## v0.1.0 - 2023-01-12
+
+### Feature:
+
+* Add function cu_pkg_get_version
+* Add macro cu_pkg_define_version
+* Add cmake script to CMAKE_MODULE_PATH
