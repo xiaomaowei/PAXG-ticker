@@ -1,0 +1,3 @@
+# Ignore downloaded upstream TFT_eSPI source directory to prevent large vendoring
+upstream/
+*.tar.gz
