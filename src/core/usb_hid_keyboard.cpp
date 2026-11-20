@@ -3,6 +3,7 @@
 #include <modules/app_state.h>
 #include <modules/constants.h>
 #include <modules/hal/usb_hid_keyboard.h>
+#include <modules/modes/fishing_mode.h>
 
 #include <atomic>
 
@@ -39,10 +40,10 @@ static std::atomic<bool> s_pendingDisconnect{false};
  * 1. USB device is actually mounted on host (_started && tinyusb_device_mounted)
  * 2. Current display mode is DisplayMode::Fishing
  * 3. Explicit armed flag (fishingArmed) is enabled by the user
- * 4. Fishing state machine is actively running (Casting, WaitingBite, Reeling)
+ * 4. Fishing state machine is actively in an execution state (Casting, Waiting, BiteDetected, Reeling)
  *
  * Absolutely NO HID transmission is permitted if unmounted, in PAXG, Clock, Weather,
- * Stopped, or Paused states.
+ * Idle, Paused, Cooldown, Timeout, or Error states.
  */
 bool is_gating_permitted()
 {
@@ -58,7 +59,10 @@ bool is_gating_permitted()
     {
         return false;
     }
-    if (fishingState == FishingState::Stopped || fishingState == FishingState::Paused)
+    if (fishingState != FishingState::Casting &&
+        fishingState != FishingState::Waiting &&
+        fishingState != FishingState::BiteDetected &&
+        fishingState != FishingState::Reeling)
     {
         return false;
     }
@@ -130,6 +134,10 @@ void usb_hid_keyboard_tick()
     {
         // Disconnect forces auto-disarm to prevent automated key transmissions upon reconnect
         fishingArmed = false;
+        if (mode == DisplayMode::Fishing && fishingState != FishingState::Idle && fishingState != FishingState::Paused)
+        {
+            fishing_trigger_error("USB DISCONNECTED");
+        }
         usb_hid_keyboard_clear_and_release_all();
         return;
     }

@@ -18,6 +18,9 @@ constexpr unsigned long MODE1_UPDATE_INTERVAL = 5000UL;    // clock
 constexpr unsigned long MODE2_UPDATE_INTERVAL = 300000UL;  // weather
 constexpr unsigned long MODE3_UPDATE_INTERVAL = 100UL;     // fishing dashboard UI (10Hz)
 constexpr unsigned long FISHING_SIM_TICK_INTERVAL = 50UL;  // fishing sim logic tick (20Hz)
+constexpr unsigned long FISHING_AUDIO_SAMPLE_RATE_HZ = 16000UL;  // 16kHz PCM
+constexpr size_t FISHING_AUDIO_FRAME_SIZE = 128;                 // 128 samples per frame
+constexpr unsigned long FISHING_AUDIO_FRAME_INTERVAL_MS = 8UL;   // Mathematically exact: 128 / 16000 = 8.0ms frame cadence
 constexpr unsigned long ROTATION_INTERVAL = 15UL;          // PAXG badge rotation speed
 constexpr int HOLD_TIME = 1000;                            // time needed to hold the button
 constexpr unsigned long BUTTON_LONG_PRESS_MS = 800UL;      // long press duration threshold for mode gestures

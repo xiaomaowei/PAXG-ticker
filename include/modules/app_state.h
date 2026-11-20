@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <modules/fishing_types.h>
 
 #include <vector>
 
@@ -12,19 +13,14 @@ enum class DisplayMode : int
     Fishing = 3,
 };
 
-enum class FishingState : int
-{
-    Stopped = 0,
-    Casting = 1,
-    WaitingBite = 2,
-    Reeling = 3,
-    Paused = 4,
-};
+using FishingState = paxg::fishing::FishingState;
+using FishingPage = paxg::fishing::FishingPage;
 
 extern DisplayMode mode;
 extern bool changed_mode;
 
 extern FishingState fishingState;
+extern FishingPage fishingCurrentPage;
 extern unsigned long fishingStateStartTime;
 extern unsigned long fishingSessionStartTime;
 extern unsigned long fishingTotalUptimeMs;
@@ -35,8 +31,12 @@ extern float fishingSimAudioThreshold;
 extern bool fishingAudioDetected;
 extern unsigned long fishingNextBiteDelayMs;
 extern unsigned long fishingWaitMaxMs;
+extern unsigned long fishingCooldownMs;
 extern bool fishingArmed;
 extern unsigned int fishingLiveKeySentCount;
+extern uint8_t fishingCastKey;
+extern uint8_t fishingInteractKey;
+extern char fishingErrorMessage[32];
 
 extern int angle;
 extern int angleMax;

@@ -71,9 +71,9 @@ Tip: Click any image to open the full-size version.
 - [scripts/load_env.py](scripts/load_env.py): pre-build .env loader
 - [platformio.ini](platformio.ini): PlatformIO build configuration
 
-## WoW Fishing Mode (Phases 1, 2, 3, 4 & 5)
+## WoW Fishing Mode (Phases 1–7 Software Integration)
 
-The 4th display mode, **WoW Fishing**, provides a nonblocking state machine dashboard with dark cyan/navy telemetry, safe standard USB HID Keyboard integration, and a platform-independent modular PCM Audio Detector.
+The 4th display mode, **WoW Fishing**, provides a complete nonblocking finite state machine (FSM) with dark cyan/navy telemetry, safe standard USB HID Keyboard integration, a platform-independent modular PCM Audio Detector connected to a bounded deterministic synthetic PCM stream, three interactive 320x170 UI pages (Dashboard, Audio Monitor, Settings), and Arduino Preferences (NVS) persistence.
 
 ### Phases Overview
 
@@ -93,9 +93,9 @@ The 4th display mode, **WoW Fishing**, provides a nonblocking state machine dash
   - **Loop Task Consumption & Auto-Disarm**: Pending disconnect/suspend signal is consumed in `usb_hid_keyboard_tick` on the Arduino main loop, immediately clearing the queue, calling `Keyboard.releaseAll()`, and forcing `fishingArmed = false` (auto-disarm). This prevents automated key transmission if the device is reconnected.
   - **Host-Mounted Gating**: Enqueue and sending strictly gate on actual host-mounted state (`_started && tinyusb_device_mounted` via `usb_hid_is_connected()`); USB initialization alone is not treated as a connected host. Unmounted state displays `USB: DISCONN` and `HID: UNAVAILABLE`.
   - **Re-arm Protection**: USB reconnect or resume events do not re-arm the device; explicit user dual-button action is required.
-  - **Strict State Gating**: Keystrokes are gated behind `DisplayMode::Fishing` **AND** `usb_hid_is_connected()` **AND** an explicit user armed state (`fishingArmed`) **AND** an active running state (`Casting`, `WaitingBite`, `Reeling`).
-  - **Zero Leakage**: No keystrokes can ever be transmitted in `PAXG`, `Clock`, `Weather`, `Stopped`, or `Paused` modes.
-  - **Configurable Safe Placeholders**: Cast key (`'1'`) and Interact key (`'2'`) constants configured in `constants.h`.
+  - **Strict State Gating**: Keystrokes are gated behind `DisplayMode::Fishing` **AND** `usb_hid_is_connected()` **AND** an explicit user armed state (`fishingArmed`) **AND** an active running state (`Casting`, `Waiting`, `BiteDetected`, `Reeling`).
+  - **Zero Leakage**: No keystrokes can ever be transmitted in `PAXG`, `Clock`, `Weather`, `Idle`, `Paused`, `Cooldown`, `Timeout`, or `Error` states.
+  - **Configurable Safe Placeholders**: Cast key (`'1'`) and Interact key (`'2'`) configurable via Settings UI and persisted in NVS.
 - **Phase 4 (Isolated USB Audio Feasibility Proof)**:
   - **Strict Isolation**: Implementation kept strictly inside `test/usb_audio_poc/**`; excluded from default firmware build (`pio run`).
   - **Validation Result**: Headers (`tusb.h`, `class/audio/audio_device.h`) compile cleanly when driver macros are configured; linking against `libarduino_tinyusb.a` fails with `undefined reference to tud_audio_n_read`.
@@ -106,34 +106,62 @@ The 4th display mode, **WoW Fishing**, provides a nonblocking state machine dash
   - **Replaceable DSP Interface**: `IAudioDetector` interface with default `PcmAudioDetector` implementation, platform-independent and decoupled from transport layer.
   - **Bounded Buffer & Metrics**: Uses `PcmRingBuffer` (bounded zero-allocation FIFO), `uint32_t peak` calculation (computed via `int32_t` abs to represent `INT16_MIN` magnitude 32768 without narrowing or overflow), RMS calculation, adaptive exponential moving average (EMA) ambient noise floor tracking, and dynamic thresholding (`max(absoluteThreshold, noiseFloor * thresholdRatio)`).
   - **Debounce & Cooldown Guards**: Requires consecutive frames above threshold (`debounceFrames = 2`) before latching trigger; enforces mandatory lockout window (`cooldownFrames = 25`) preventing double-triggering.
-  - **Synthetic Test Verification**: Exercised via deterministic synthetic waveforms ([test/audio_detector/test_audio_detector.cpp](test/audio_detector/test_audio_detector.cpp)) testing normal bursts, `INT16_MIN` boundary magnitude, noise spike debounce rejection, cooldown rejection, and re-arming. Verified via full source cross-compilation with `-Wall -Wextra -Werror` (and native execution when host compiler is available).
-  - **Disclaimers**: Firmware builds cleanly (`pio run`); detector makes no claim of real audio capture or in-game WoW bobber splash acoustic recognition accuracy.
+  - **Synthetic Test Verification**: Exercised via deterministic synthetic waveforms ([test/audio_detector/test_audio_detector.cpp](test/audio_detector/test_audio_detector.cpp)) testing normal bursts, `INT16_MIN` boundary magnitude, noise spike debounce rejection, cooldown rejection, and re-arming.
+- **Phase 6 (Synthetic PCM Loop, 9-State FSM & Multi-Page UI)**:
+  - **Synthetic Stream Integration**: Connects `PcmAudioDetector` directly to bounded synthetic PCM16 mono frames (128 samples per frame) at a mathematically exact 8.0ms cadence (128 samples / 16000Hz = 8.0ms) matching the declared 16kHz PCM audio configuration. Clearly labeled as synthetic; makes no claim of actual audio capture or WoW bobber bite splash recognition accuracy.
+  - **Deterministic Platform-Independent FSM (`FishingStateMachine`)**: Small, pure state machine (`include/modules/fishing_state_machine.h`) enforcing all state transition rules across 9 distinct named states: `IDLE`, `CASTING`, `WAITING`, `BITE_DETECTED`, `REELING`, `COOLDOWN`, `TIMEOUT`, `PAUSED`, `ERROR`. Timed purely via `millis()` with zero blocking delays.
+  - **Reachable Deterministic Timeout**: Every 4th cast in simulation schedules bite burst beyond the configured `waitTimeoutMs` window, deterministically testing timeout transitions. Timeout can also be reached by lowering wait timeout in Settings.
+  - **Safe Error State**: Any USB disconnection or subsystem failure transitions to `ERROR`, forces `fishingArmed = false`, clears the command queue, calls `releaseAll()`, and displays a clear error state.
+  - **Three 320x170 UI Pages** (rendered via `fishing_display` sprite, zero LCD flicker):
+    - **Page 0 (Dashboard)**: Simulated reel count (`SIM REEL CMDS`), timeouts, live keys sent, runtime uptime, wait/cast/cooldown progress bars, state pill, USB host mount status, HID safety indicator, PCM synthetic indicator (`Buf: SYNTH (No UAC)`).
+    - **Page 1 (Audio Monitor)**: Full-width live RMS scope sparkline with horizontal threshold marker, numerical Peak/RMS/Noise readouts, dynamic threshold calculation, debounce/cooldown status, and ring buffer diagnostics.
+    - **Page 2 (Settings)**: Interactive menu to select and adjust persistent parameters.
+- **Phase 7 (Persistent Settings, Conflict-Free Controls & Final Local Acceptance)**:
+  - **Arduino Preferences (NVS) Persistence**: Automatically stores and restores `absoluteThreshold` (500–5000, step 250), `waitTimeoutMs` (5000–30000ms, step 1000ms), `cooldownMs` (500–5000ms, step 500ms), `castKey` (whitelist), and `interactKey` (whitelist) in namespace `paxg_fishing`. Clamps all values on load and save. Default startup is safely disarmed (`fishingArmed = false`). No secrets stored.
+  - **Conflict-Free Button Handling**:
+    - **PAXG / Clock / Weather Modes**: Button UP (GPIO 14) and Button DOWN (GPIO 0) releases strictly navigate modes forward and backward, regardless of whether pressed short or held long.
+    - **Fishing Mode**:
+      - **Short Press UP (< 800ms)**: Next Page (`Dashboard -> Audio -> Settings`) on Pages 0 & 1; Next Item on Page 2.
+      - **Short Press DOWN (< 800ms)**: Adjusts Value on Page 2 (persisting to NVS); Reliable Exit to PAXG mode on Pages 0 & 1 (auto-disarms and releases keys).
+      - **Long Press UP (Hold >= 800ms)**: Toggle Start / Pause / Resume on Pages 0 & 1; Quick Return to Dashboard on Page 2.
+      - **Long Press DOWN (Hold >= 800ms)**: Stop (1st hold) / Reset counters (2nd hold) on Pages 0 & 1; Reset Settings to Defaults on Page 2.
+      - **Dual-Button Long Press (Both UP + DOWN >= 800ms)**: Toggle ARM / DISARM (host-mounted gated).
+      - **Mutual Exclusivity**: Long press actions execute at the 800ms threshold and set `handled = true`, preventing the short press from firing on release. Long and short events cannot both fire.
+  - **Deterministic FSM Unit Tests**: Added unit tests 10 through 15 covering settings bounds clamping, normal bite flow, timeout transition, pause/resume/stop gating, error/disarm safety, and systematic invalid transition rejection in `test/audio_detector/test_audio_detector.cpp`, all calling the production `FishingStateMachine` directly.
 
 ### Button Controls & Gesture Navigation
 
 The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):
 
-| Gesture | Active Modes | Action |
+| Gesture | Mode / Screen | Action |
 | :--- | :--- | :--- |
-| **Short Press UP (< 800ms)** | All modes (on release) | Cycle mode forward: `PAXG -> Clock -> Weather -> Fishing -> PAXG` |
-| **Short Press DOWN (< 800ms)** | All modes (on release) | Cycle mode backward: `PAXG -> Fishing -> Weather -> Clock -> PAXG` |
-| **Long Press UP (Hold >= 800ms)** | Fishing Mode only | **Toggle Start / Pause / Resume** simulation |
-| **Long Press DOWN (Hold >= 800ms)** | Fishing Mode only | **Stop** simulation (1st hold) / **Reset** counters (2nd hold) |
-| **Hold Both Buttons (>= 800ms)** | Fishing Mode only | **Toggle Armed / Disarmed** (Enables/disables live HID keystrokes, requires mounted host) |
+| **Short Press UP (< 800ms)** | Outside Fishing (on release) | Cycle mode forward: `PAXG -> Clock -> Weather -> Fishing -> PAXG` |
+| **Short Press DOWN (< 800ms)** | Outside Fishing (on release) | Cycle mode backward: `PAXG -> Fishing -> Weather -> Clock -> PAXG` |
+| **Long Press UP (Hold >= 800ms)** | Outside Fishing (on release) | Preserves top-level mode navigation forward |
+| **Long Press DOWN (Hold >= 800ms)** | Outside Fishing (on release) | Preserves top-level mode navigation backward |
+| **Short Press UP (< 800ms)** | Fishing (Dashboard / Audio) | Cycle page forward: `Dashboard -> Audio Monitor -> Settings` |
+| **Short Press UP (< 800ms)** | Fishing (Settings Page) | Navigate to next setting parameter (row 1 to 6) |
+| **Short Press DOWN (< 800ms)** | Fishing (Dashboard / Audio) | **Reliable Exit** to PAXG mode (auto-disarms, flushes queue, releases keys) |
+| **Short Press DOWN (< 800ms)** | Fishing (Settings Page) | **Adjust Value** of selected setting (persisted to NVS) |
+| **Long Press UP (Hold >= 800ms)** | Fishing (Dashboard / Audio) | **Start / Pause / Resume** simulation |
+| **Long Press UP (Hold >= 800ms)** | Fishing (Settings Page) | Quick Return to Dashboard |
+| **Long Press DOWN (Hold >= 800ms)** | Fishing (Dashboard / Audio) | **Stop** simulation (1st hold) / **Reset** session telemetry (2nd hold) |
+| **Long Press DOWN (Hold >= 800ms)** | Fishing (Settings Page) | **Reset Settings to Factory Defaults** |
+| **Hold Both Buttons (>= 800ms)** | Fishing (Any page) | **Toggle Armed / Disarmed** (requires mounted USB host) |
 
 #### Debounce, Safety, and Release Behavior
 - **Debounce**: 50ms contact debounce filter applied to both button inputs to eliminate chatter.
-- **Release-Triggered Navigation**: Short-press mode cycling triggers strictly on button release if the press duration was under 800ms and no long-press action fired.
-- **Long-Press Protection**: In Fishing mode, holding for >= 800ms fires the start/pause, stop, or arm/disarm action immediately and sets an internal flag so that releasing the button does not trigger a mode cycle.
-- **Auto-Disarm on Exit & Disconnect**: Leaving Fishing mode or unplugging/suspending USB immediately sets `fishingArmed = false`, flushes any pending queued keys, and calls `Keyboard.releaseAll()`.
+- **Mutual Exclusivity**: Long-press actions execute on threshold (800ms) and set internal suppression flags. Releasing the button will not trigger a short-press action. Long and short events cannot both fire.
+- **Auto-Disarm on Exit & Disconnect**: Leaving Fishing mode, exiting to PAXG, or unplugging/suspending USB immediately sets `fishingArmed = false`, flushes pending queued keys, and calls `Keyboard.releaseAll()`.
+- **Reset Telemetry vs Stop**: In Fishing mode, the first long press on DOWN stops the active run (transitions to `IDLE`) and disarms. A second long press while already in `IDLE` resets session counters (`simReelCmds = 0`, `simTimeouts = 0`, `uptime = 0`, `liveKeySentCount = 0`).
 - **Setup Isolation**: Wi-Fi selection and keyboard input routines in `src/hal/utils.cpp` execute inside `app_setup()` prior to `app_loop()` and do not interact with runtime mode switching.
 
 ### USB Feasibility Status & Disclaimers
 
 - **What Was Tested**:
-  - Successful compilation and clean firmware linking with PlatformIO for target `lilygo-t-display-s3` (ESP32-S3), verifying stock `USBHIDKeyboard` integration, thread-safe disconnect consumption, bounded command queue state transitions, separate service tick press/release pairing, and strict gating logic.
+  - Successful compilation and clean firmware linking with PlatformIO for target `lilygo-t-display-s3` (ESP32-S3), verifying stock `USBHIDKeyboard` integration, thread-safe disconnect consumption, bounded command queue state transitions, separate service tick press/release pairing, 9-state nonblocking FSM, 3 UI pages, and strict gating logic.
   - Phase 4 isolated UAC feasibility proof: asserted compilation success and asserted link failure specifically on missing `tud_audio` symbols due to absence of `audio_device.c` and symbols in `libarduino_tinyusb.a`.
-  - Phase 5 modular PCM audio detector: verified bounded ring buffer behavior, Peak (`uint32_t`, handling `INT16_MIN` magnitude 32768) and RMS calculation, adaptive noise floor tracking, debounce rejection of noise spikes, and cooldown gating via full test/implementation cross-compilation with strict flags (`-Wall -Wextra -Werror`).
+  - Phases 5–7 modular PCM audio detector, synthetic stream loop, FSM transitions, and persistent settings clamping: verified via cross-compilation with strict flags (`-Wall -Wextra -Werror`).
 - **What Remains Unverified**:
   - Physical execution on hardware: Local ESP32-S3 physical device validation was unavailable.
   - Windows 11 host USB composite driver enumeration and keystroke delivery across Windows USB hubs.

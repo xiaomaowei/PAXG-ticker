@@ -6,19 +6,24 @@
 DisplayMode mode = DisplayMode::PAXG;
 bool changed_mode = true;
 
-FishingState fishingState = FishingState::Stopped;
+FishingState fishingState = FishingState::Idle;
+FishingPage fishingCurrentPage = FishingPage::Dashboard;
 unsigned long fishingStateStartTime = 0;
 unsigned long fishingSessionStartTime = 0;
 unsigned long fishingTotalUptimeMs = 0;
 unsigned int fishingSimReelCmds = 0;
 unsigned int fishingSimTimeouts = 0;
 float fishingSimAudioLevel = 0.0f;
-float fishingSimAudioThreshold = 0.75f;
+float fishingSimAudioThreshold = 0.30f;
 bool fishingAudioDetected = false;
 unsigned long fishingNextBiteDelayMs = 0;
-unsigned long fishingWaitMaxMs = 20000UL;
+unsigned long fishingWaitMaxMs = paxg::fishing::DEFAULT_WAIT_TIMEOUT_MS;
+unsigned long fishingCooldownMs = paxg::fishing::DEFAULT_COOLDOWN_MS;
 bool fishingArmed = false;
 unsigned int fishingLiveKeySentCount = 0;
+uint8_t fishingCastKey = paxg::fishing::DEFAULT_CAST_KEY;
+uint8_t fishingInteractKey = paxg::fishing::DEFAULT_INTERACT_KEY;
+char fishingErrorMessage[32] = {0};
 
 int angle = 0;
 int angleMax = 30;

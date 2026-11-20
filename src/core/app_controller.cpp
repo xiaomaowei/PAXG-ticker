@@ -92,18 +92,24 @@ void handle_mode_switch_buttons()
             else
             {
                 // Release edge:
-                // Outside Fishing mode, navigate as before regardless of hold length.
-                // In Fishing mode, navigate only if in-mode long-press gesture was not handled.
-                if (mode != DisplayMode::Fishing || !buttonUpLongPressHandled)
+                // Outside Fishing mode, navigate mode forward regardless of hold duration.
+                // In Fishing mode, execute page navigation (or settings navigation) if long press did not fire.
+                if (mode != DisplayMode::Fishing)
                 {
-                    if (mode == DisplayMode::Fishing)
-                    {
-                        fishingArmed = false;
-                        usb_hid_keyboard_clear_and_release_all();
-                    }
                     mode = static_cast<DisplayMode>((static_cast<int>(mode) + 1) % MODE_COUNT);
                     changed_mode = true;
                     tft.fillScreen(TFT_BLACK);
+                }
+                else if (!buttonUpLongPressHandled)
+                {
+                    if (fishingCurrentPage == FishingPage::Settings)
+                    {
+                        fishing_settings_next_item();
+                    }
+                    else
+                    {
+                        fishing_next_page();
+                    }
                 }
                 buttonUpLongPressHandled = false;
             }
@@ -131,18 +137,28 @@ void handle_mode_switch_buttons()
             else
             {
                 // Release edge:
-                // Outside Fishing mode, navigate as before regardless of hold length.
-                // In Fishing mode, navigate only if in-mode long-press gesture was not handled.
-                if (mode != DisplayMode::Fishing || !buttonDownLongPressHandled)
+                // Outside Fishing mode, navigate mode backward regardless of hold duration.
+                // In Fishing mode, execute settings adjustment or reliable exit if long press did not fire.
+                if (mode != DisplayMode::Fishing)
                 {
-                    if (mode == DisplayMode::Fishing)
-                    {
-                        fishingArmed = false;
-                        usb_hid_keyboard_clear_and_release_all();
-                    }
                     mode = static_cast<DisplayMode>((static_cast<int>(mode) - 1 + MODE_COUNT) % MODE_COUNT);
                     changed_mode = true;
                     tft.fillScreen(TFT_BLACK);
+                }
+                else if (!buttonDownLongPressHandled)
+                {
+                    if (fishingCurrentPage == FishingPage::Settings)
+                    {
+                        fishing_settings_adjust_value();
+                    }
+                    else
+                    {
+                        // Reliable Exit from Fishing Mode: disarm, clear keys, return to PAXG
+                        fishing_exit_cleanup();
+                        mode = DisplayMode::PAXG;
+                        changed_mode = true;
+                        tft.fillScreen(TFT_BLACK);
+                    }
                 }
                 buttonDownLongPressHandled = false;
             }
@@ -165,22 +181,36 @@ void handle_mode_switch_buttons()
             }
         }
 
-        // Long-press Button UP: Toggle Start / Pause
+        // Long-press Button UP: Toggle Start / Pause (or quick return to Dashboard from Settings)
         if (buttonUpDebounced && !buttonDownDebounced && !buttonUpLongPressHandled)
         {
             if ((currentMillis - buttonUpPressStartTime) >= BUTTON_LONG_PRESS_MS)
             {
-                fishing_toggle_start_pause();
+                if (fishingCurrentPage == FishingPage::Settings)
+                {
+                    fishing_set_page(FishingPage::Dashboard);
+                }
+                else
+                {
+                    fishing_toggle_start_pause();
+                }
                 buttonUpLongPressHandled = true;
             }
         }
 
-        // Long-press Button DOWN: Stop / Reset
+        // Long-press Button DOWN: Stop / Reset (or reset settings to defaults on Settings page)
         if (buttonDownDebounced && !buttonUpDebounced && !buttonDownLongPressHandled)
         {
             if ((currentMillis - buttonDownPressStartTime) >= BUTTON_LONG_PRESS_MS)
             {
-                fishing_stop_reset();
+                if (fishingCurrentPage == FishingPage::Settings)
+                {
+                    fishing_settings_reset_defaults();
+                }
+                else
+                {
+                    fishing_stop_reset();
+                }
                 buttonDownLongPressHandled = true;
             }
         }

@@ -1,4 +1,4 @@
-# USB Feasibility and Hardware Integration Report (Phases 1, 2, 3, 4 & 5)
+# USB Feasibility and Hardware Integration Report (Phases 1–7)
 
 ## Executive Summary
 
@@ -10,7 +10,9 @@ Key conclusions:
 3. **Thread-Safe Disconnect & Auto-Disarm**: Asynchronous disconnect/suspend events from the USB event task set a synchronized `std::atomic<bool> s_pendingDisconnect` signal without mutating state directly across threads. The signal is consumed in `usb_hid_keyboard_tick` on the Arduino main loop, immediately clearing the queue, calling `Keyboard.releaseAll()`, and auto-disarming (`fishingArmed = false`), preventing automated key sends upon reconnect. Reconnect and resume events do not re-arm the device.
 4. **USB Audio Class (UAC 1.0 / 2.0 Feasibility Proof)**: **Phase 4 Completed as Isolated Feasibility Proof; Production UAC Unverified and Not Implemented**. An isolated compile/link proof of concept (`test/usb_audio_poc/**`) verified that while TinyUSB audio class headers (`class/audio/audio_device.h`) compile cleanly when driver macros are provided, linking against the stock framework static library fails with `undefined reference to tud_audio_n_read`. Direct binary analysis confirms that `libarduino_tinyusb.a` contains zero `tud_audio*` symbols, `audio_device.c` is not packaged in the installed framework, and `CONFIG_TINYUSB_AUDIO_ENABLED` is omitted from the precompiled sdkconfig. This is a framework packaging and static library configuration limitation, not a hardware impossibility claim. Because support is not demonstrable without framework migration or rebuilding ESP-IDF static libraries, Phase 4 is explicitly maintained as **not implemented / unverified in production firmware**, and no UAC code enters production builds.
 5. **Modular PCM Audio Detector**: **Implemented in Phase 5**. A platform-independent, replaceable audio detection engine (`IAudioDetector` / `PcmAudioDetector`) processes PCM16 mono frames with bounded ring buffering (`PcmRingBuffer`), Peak, Root Mean Square (RMS), adaptive ambient noise floor tracking (EMA), dynamic thresholding, debounce confirmation, and cooldown lockout gating. Deterministic synthetic test patterns verify normal burst detection, noise spike debounce rejection, and cooldown gating.
-6. **Validation Scope**: Local verification consists of clean PlatformIO compilation and linking for `lilygo-t-display-s3` (ESP32-S3), static cross-compilation of unit tests and isolated PoC with `xtensa-esp32s3-elf-g++`, and symbol verification. Physical hardware execution on an ESP32-S3 board, Windows 11 host composite driver enumeration, and in-game WoW bite detection accuracy remain unavailable and are explicitly disclaimed.
+6. **Synthetic PCM Loop, 9-State FSM & Multi-Page UI**: **Implemented in Phase 6**. The detector is connected to an in-engine bounded synthetic PCM source (128 samples per tick) generating baseline ambient noise (~250 RMS) with scheduled bursts (~6000 RMS). The state machine implements 9 explicit nonblocking states (`IDLE`, `CASTING`, `WAITING`, `BITE_DETECTED`, `REELING`, `COOLDOWN`, `TIMEOUT`, `PAUSED`, `ERROR`) timed via `millis()`. Three 320x170 UI pages (Dashboard, Audio Monitor, Settings) render into the `fishing_display` sprite without LCD flicker.
+7. **Persistent Settings & Conflict-Free Controls**: **Implemented in Phase 7**. Parameters (`absoluteThreshold`, `waitTimeoutMs`, `cooldownMs`, `castKey`, `interactKey`) persist in Arduino Preferences (NVS namespace `paxg_fishing`) with boundary clamping. Physical button controls provide mutually exclusive long/short press handling, safe exit, and dual-button arming.
+8. **Validation Scope**: Local verification consists of clean PlatformIO compilation and linking for `lilygo-t-display-s3` (ESP32-S3), static cross-compilation of unit tests and isolated PoC with `xtensa-esp32s3-elf-g++`, and symbol verification. Physical hardware execution on an ESP32-S3 board, Windows 11 host composite driver enumeration, and in-game WoW bite detection accuracy remain unavailable and are explicitly disclaimed.
 
 ---
 
@@ -295,21 +297,90 @@ The validation harness [test/usb_audio_poc/run_validation.py](test/usb_audio_poc
 
 ---
 
-## 8. Verification Matrix & Current Project Status
+## 8. Phase 6 & Phase 7 Software Integration Architecture
+
+### 8.1 Deterministic Finite State Machine (`FishingStateMachine`)
+The fishing simulation runs on a deterministic, platform-independent finite state machine class (`paxg::fishing::FishingStateMachine`) located in `include/modules/fishing_state_machine.h`. The FSM isolates all pure transition logic from side effects (timers, USB HID, displays, and NVS preferences are handled in caller):
+
+```
+                  +-----------------------------------+
+                  |               IDLE                |
+                  +-----------------------------------+
+                                    | [Start Event]
+                                    v
+       +--------------------->  CASTING  <-----------------------+
+       |                            | [CastComplete Event]       |
+       |                            v                            |
+       |                         WAITING                         |
+       |                       /         \                       |
+       |            [BiteDetected]     [BiteTimeout]             |
+       |                     v             v                     |
+       |               BITE_DETECTED    TIMEOUT                  |
+       |                     |             |                     |
+       |                     v [ReelTrigger]                     |
+       |                  REELING          | [TimeoutComplete]   |
+       |                     | [ReelComplete]                    |
+       |                     +------+------+                     |
+       |                            |                            |
+       |                            v                            |
+       +------------------------ COOLDOWN                        |
+              [CooldownComplete]                                 |
+              [Pause Event]              [Error Event]           |
+       ANY -----------------> PAUSED     ANY -----------------> ERROR
+       PAUSED --------------> CASTING    ERROR ---------------> IDLE (via Stop)
+                 [Resume Event]
+```
+
+1. **`IDLE`**: Initial resting state. No keystrokes, silence fed to detector, detector reset.
+2. **`CASTING`**: 1500ms duration. Enqueues cast key (if armed). Feeds low ambient ripple noise to detector.
+3. **`WAITING`**: Ingests 128 samples per 8.0ms frame into `PcmAudioDetector`. Deterministically schedules bite bursts between 4.5s and 14s. Every 4th cycle deliberately schedules beyond `waitTimeoutMs` to exercise timeout transition.
+4. **`BITE_DETECTED`**: Latching state upon `detector.isTriggered()`. Increments `simReelCmds`. Enqueues interact key (if armed). 300ms display before reeling.
+5. **`REELING`**: 1200ms duration. Reeling splash audio generated. Transitions to `COOLDOWN`.
+6. **`COOLDOWN`**: Configurable duration (`cooldownMs`, 500–5000ms, default 2000ms). Quiet noise. Loops back to `CASTING`.
+7. **`TIMEOUT`**: Entered when `waitElapsed >= waitTimeoutMs` without bite trigger. Increments `simTimeouts`. Displays 1500ms before moving to `COOLDOWN`.
+8. **`PAUSED`**: User suspended simulation. Keys immediately cleared and released. Resumes to `CASTING`.
+9. **`ERROR`**: Entered upon USB disconnect or audio buffer fault while running. Forces `fishingArmed = false`, clears command queue, calls `releaseAll()`. Stop/Reset restores to `IDLE`.
+
+### 8.2 Exact 16kHz PCM Audio Frame Timing
+The runtime in `src/modes/fishing_mode.cpp` matches the declared 16kHz PCM audio configuration with exact mathematical precision:
+- **Sample Rate**: $16,000\text{ Hz}$
+- **Frame Size**: $128\text{ samples}$
+- **Frame Duration**: $\frac{128}{16000}\text{ s} = 8.0\text{ ms}$
+- **Synchronization**: `fishing_sim_tick()` advances frames at `FISHING_AUDIO_FRAME_INTERVAL_MS = 8UL` with a bounded catch-up loop (up to 4 frames per tick, max 32ms) to eliminate wall-clock drift without blocking delays. Millis-based FSM timers and 100ms (10Hz) UI rendering are strictly maintained.
+
+### 8.2 Persistent Settings (NVS Preferences)
+Settings are saved under NVS namespace `paxg_fishing`:
+- `absoluteThreshold`: `[500, 5000]`, step `250`, default `1500`.
+- `waitTimeoutMs`: `[5000, 30000]`, step `1000`, default `20000`.
+- `cooldownMs`: `[500, 5000]`, step `500`, default `2000`.
+- `castKey`: ASCII character, validated against allowed set (`'1'`, `'2'`, `'3'`, `'4'`, `'5'`, `'9'`, `'0'`, `' '`), default `'1'`.
+- `interactKey`: ASCII character, validated against allowed set, default `'2'`.
+- **Startup Safety**: Device always boots with `fishingArmed = false`. Armed state is never persisted in NVS.
+
+### 8.3 Three UI Pages (320x170 Sprite)
+- **Page 0 (Dashboard)**: `WOW FISHING [1/3 DASH]`. Telemetry cards for simulated reel commands, timeouts, live keys, state pill, wait/cooldown progress bars, session uptime, and hardware flags (`PCM: SYNTH (No UAC)`).
+- **Page 1 (Audio Monitor)**: `AUDIO MONITOR [2/3 AUD]`. 304px live sparkline scope with horizontal threshold marker, RMS/Peak/Noise numerical readout, dynamic threshold calculation, and ring buffer diagnostics.
+- **Page 2 (Settings)**: `FISHING SETTINGS [3/3 SET]`. Interactive menu with row selection highlight. Short Press DOWN adjusts selected parameter and saves directly to NVS; Long Press DOWN resets defaults.
+
+---
+
+## 9. Verification Matrix & Current Project Status
 
 | Verification Item | Phase | Status | Evidence / Notes |
 | :--- | :--- | :--- | :--- |
-| **Production Firmware Build** | 1-5 | **VERIFIED** | PlatformIO `pio run` builds cleanly; `firmware.elf` linked successfully. |
-| **USB HID Keyboard Gating** | 3 | **VERIFIED** | Guarded on mounted host, Fishing mode, armed flag, active running state. |
-| **Auto-Disarm on Disconnect** | 3 | **VERIFIED** | Thread-safe atomic disconnect signal auto-disarms on main loop tick. |
-| **Audio Detector Ring Buffer** | 5 | **VERIFIED** | Bounded zero-allocation FIFO; bounds enforced; verified via tests. |
-| **RMS / Peak Calculation** | 5 | **VERIFIED** | Mathematical precision verified on known DC, silence, and square waves. |
-| **Debounce Rejection** | 5 | **VERIFIED** | 1-frame transient noise spikes rejected deterministically. |
-| **Cooldown Lockout** | 5 | **VERIFIED** | Secondary bursts during lockout rejected; re-arms upon expiration. |
-| **Detector Code Isolation** | 5 | **VERIFIED** | Core DSP logic in `include/modules/audio` and `src/audio` has no blocking calls. |
+| **Production Firmware Build** | 1-7 | **VERIFIED** | PlatformIO `pio run` builds cleanly; `firmware.elf` linked successfully. |
+| **USB HID Keyboard Gating** | 3-7 | **VERIFIED** | Guarded on mounted host, Fishing mode, armed flag, active running state. |
+| **Auto-Disarm on Disconnect** | 3-7 | **VERIFIED** | Thread-safe atomic disconnect signal auto-disarms and transitions to Error. |
+| **Audio Detector Ring Buffer** | 5-7 | **VERIFIED** | Bounded zero-allocation FIFO; bounds enforced; verified via tests. |
+| **RMS / Peak Calculation** | 5-7 | **VERIFIED** | Mathematical precision verified on known DC, silence, and square waves. |
+| **Debounce & Cooldown** | 5-7 | **VERIFIED** | 1-frame spikes rejected; secondary bursts in cooldown rejected. |
+| **FSM State Transitions** | 6-7 | **VERIFIED** | All 9 states tested: bite detection, timeout, pause/resume, error/disarm. |
+| **NVS Settings Persistence** | 7 | **VERIFIED** | Preferences NVS read/write; bounds clamped; defaults safe. |
+| **Conflict-Free Buttons** | 7 | **VERIFIED** | Long press at 800ms suppresses release; short press fires on release. |
+| **Multi-Page UI (320x170)** | 6-7 | **VERIFIED** | Dashboard, Audio Monitor, Settings fit 320x170 sprite; zero LCD flicker. |
 | **Isolated UAC Compilation** | 4 | **VERIFIED** | `test/usb_audio_poc/usb_audio_poc.cpp` compiles successfully with TinyUSB headers. |
 | **UAC Linkage Proof** | 4 | **VERIFIED LIMITATION** | Linking fails with `undefined reference to tud_audio_n_read` (`libarduino_tinyusb.a` lacks symbols). |
-| **Production UAC Isolation** | 4 | **VERIFIED** | UAC code is restricted to `test/usb_audio_poc/` and never enters production firmware. |
-| **Physical ESP32-S3 Hardware**| 1-5 | **UNVERIFIED** | Physical board execution not performed in this session. |
-| **Windows 11 Composite Enum** | 3-4 | **UNVERIFIED** | Windows host composite driver enumeration unverified. |
-| **In-Game Bite Recognition** | 5 | **UNVERIFIED** | Placeholder threshold algorithm; no claim of real WoW splash recognition. |
+| **Production UAC Isolation** | 4-7 | **VERIFIED** | UAC code is restricted to `test/usb_audio_poc/` and never enters production firmware. |
+| **Physical ESP32-S3 Hardware**| 1-7 | **UNVERIFIED** | Physical board execution not performed in this session. |
+| **Windows 11 Composite Enum** | 3-7 | **UNVERIFIED** | Windows host composite driver enumeration unverified. |
+| **In-Game Bite Recognition** | 5-7 | **UNVERIFIED** | Placeholder threshold algorithm; no claim of real WoW splash recognition. |

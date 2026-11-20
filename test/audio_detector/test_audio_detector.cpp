@@ -1,6 +1,7 @@
 #include "modules/audio/audio_ring_buffer.h"
 #include "modules/audio/audio_detector.h"
 #include "modules/audio/synthetic_audio_samples.h"
+#include "modules/fishing_types.h"
 
 #include <cassert>
 #include <cmath>
@@ -380,11 +381,303 @@ bool test_synthetic_scenario_end_to_end() {
 }
 
 /**
+ * @brief Test 10: Persistent Settings Sane Bounds Clamping
+ */
+bool test_fishing_settings_bounds_clamping() {
+    using namespace paxg::fishing;
+
+    FishingSettingsData s;
+    s.clamp();
+    TEST_ASSERT(s.absoluteThreshold == DEFAULT_THRESHOLD, "Default threshold is 1500");
+    TEST_ASSERT(s.waitTimeoutMs == DEFAULT_WAIT_TIMEOUT_MS, "Default timeout is 20000ms");
+    TEST_ASSERT(s.cooldownMs == DEFAULT_COOLDOWN_MS, "Default cooldown is 2000ms");
+    TEST_ASSERT(s.castKey == DEFAULT_CAST_KEY, "Default cast key is '1'");
+    TEST_ASSERT(s.interactKey == DEFAULT_INTERACT_KEY, "Default interact key is '2'");
+
+    // Below minimum bounds
+    s.absoluteThreshold = 100;
+    s.waitTimeoutMs = 1000;
+    s.cooldownMs = 200;
+    s.castKey = 'x';       // invalid
+    s.interactKey = 0xFF;  // invalid
+    s.clamp();
+    TEST_ASSERT(s.absoluteThreshold == MIN_THRESHOLD, "Clamped to MIN_THRESHOLD (500)");
+    TEST_ASSERT(s.waitTimeoutMs == MIN_WAIT_TIMEOUT_MS, "Clamped to MIN_WAIT_TIMEOUT_MS (5000)");
+    TEST_ASSERT(s.cooldownMs == MIN_COOLDOWN_MS, "Clamped to MIN_COOLDOWN_MS (500)");
+    TEST_ASSERT(s.castKey == DEFAULT_CAST_KEY, "Invalid cast key restored to default '1'");
+    TEST_ASSERT(s.interactKey == DEFAULT_INTERACT_KEY, "Invalid interact key restored to default '2'");
+
+    // Above maximum bounds
+    s.absoluteThreshold = 10000;
+    s.waitTimeoutMs = 60000;
+    s.cooldownMs = 10000;
+    s.castKey = '3';      // valid allowed key
+    s.interactKey = ' ';  // valid allowed key
+    s.clamp();
+    TEST_ASSERT(s.absoluteThreshold == MAX_THRESHOLD, "Clamped to MAX_THRESHOLD (5000)");
+    TEST_ASSERT(s.waitTimeoutMs == MAX_WAIT_TIMEOUT_MS, "Clamped to MAX_WAIT_TIMEOUT_MS (30000)");
+    TEST_ASSERT(s.cooldownMs == MAX_COOLDOWN_MS, "Clamped to MAX_COOLDOWN_MS (5000)");
+    TEST_ASSERT(s.castKey == '3', "Allowed key '3' preserved");
+    TEST_ASSERT(s.interactKey == ' ', "Allowed key ' ' preserved");
+
+    return true;
+}
+
+/**
+ * @brief Test 11: Production FSM Normal Bite Flow via FishingStateMachine
+ */
+bool test_fsm_normal_bite_flow() {
+    using namespace paxg::fishing;
+
+    AudioDetectorConfig cfg;
+    cfg.sampleRate = 16000;
+    cfg.frameSize = 128;
+    cfg.debounceFrames = 2;
+    cfg.cooldownFrames = 20;
+    cfg.absoluteThreshold = 1500;
+    PcmAudioDetector detector(cfg);
+
+    FishingStateMachine fsm(FishingState::Idle);
+    TEST_ASSERT(fsm.getState() == FishingState::Idle, "Initial state must be Idle");
+
+    // 1. User starts simulation: Idle -> Casting
+    bool ok = fsm.handleEvent(FishingEvent::Start);
+    TEST_ASSERT(ok, "Start event accepted in Idle");
+    TEST_ASSERT(fsm.getState() == FishingState::Casting, "State transitions to Casting");
+
+    // 2. Casting animation completes (1500ms): Casting -> Waiting
+    ok = fsm.handleEvent(FishingEvent::CastComplete);
+    TEST_ASSERT(ok, "CastComplete event accepted in Casting");
+    TEST_ASSERT(fsm.getState() == FishingState::Waiting, "State transitions to Waiting");
+
+    // Ingest ambient noise frames: detector must NOT trigger
+    int16_t noiseFrame[128];
+    SyntheticAudioGenerator::generateNoise(noiseFrame, 128, 250, 42);
+    detector.processSamples(noiseFrame, 128);
+    detector.processSamples(noiseFrame, 128);
+    TEST_ASSERT(!detector.isTriggered(), "Detector not triggered by ambient noise");
+    TEST_ASSERT(fsm.getState() == FishingState::Waiting, "FSM remains in Waiting");
+
+    // Ingest bite splash burst (2 frames, RMS ~6000 > 1500)
+    int16_t biteFrame[128];
+    SyntheticAudioGenerator::generateBurst(biteFrame, 128, 250, 6000, 0, 128, 100);
+    detector.processSamples(biteFrame, 128);
+    detector.processSamples(biteFrame, 128);
+    TEST_ASSERT(detector.isTriggered(), "Detector triggered by synthetic bite burst");
+    detector.clearTrigger();
+
+    // 3. Audio bite confirmed: Waiting -> BiteDetected
+    ok = fsm.handleEvent(FishingEvent::BiteDetected);
+    TEST_ASSERT(ok, "BiteDetected event accepted in Waiting");
+    TEST_ASSERT(fsm.getState() == FishingState::BiteDetected, "State transitions to BiteDetected");
+
+    // 4. BiteDetected presentation timer expires (300ms): BiteDetected -> Reeling
+    ok = fsm.handleEvent(FishingEvent::ReelTrigger);
+    TEST_ASSERT(ok, "ReelTrigger event accepted in BiteDetected");
+    TEST_ASSERT(fsm.getState() == FishingState::Reeling, "State transitions to Reeling");
+
+    // 5. Reeling duration completes (1200ms): Reeling -> Cooldown
+    ok = fsm.handleEvent(FishingEvent::ReelComplete);
+    TEST_ASSERT(ok, "ReelComplete event accepted in Reeling");
+    TEST_ASSERT(fsm.getState() == FishingState::Cooldown, "State transitions to Cooldown");
+
+    // 6. Cooldown duration completes: Cooldown -> Casting (next cycle)
+    ok = fsm.handleEvent(FishingEvent::CooldownComplete);
+    TEST_ASSERT(ok, "CooldownComplete event accepted in Cooldown");
+    TEST_ASSERT(fsm.getState() == FishingState::Casting, "State transitions back to Casting");
+
+    return true;
+}
+
+/**
+ * @brief Test 12: Production FSM Timeout Flow via FishingStateMachine
+ */
+bool test_fsm_timeout_flow() {
+    using namespace paxg::fishing;
+
+    FishingStateMachine fsm(FishingState::Waiting);
+    TEST_ASSERT(fsm.getState() == FishingState::Waiting, "Initial state is Waiting");
+
+    // 1. Wait timeout elapsed: Waiting -> Timeout
+    bool ok = fsm.handleEvent(FishingEvent::BiteTimeout);
+    TEST_ASSERT(ok, "BiteTimeout event accepted in Waiting");
+    TEST_ASSERT(fsm.getState() == FishingState::Timeout, "State transitions to Timeout");
+
+    // 2. Timeout display duration expires (1500ms): Timeout -> Cooldown
+    ok = fsm.handleEvent(FishingEvent::TimeoutComplete);
+    TEST_ASSERT(ok, "TimeoutComplete event accepted in Timeout");
+    TEST_ASSERT(fsm.getState() == FishingState::Cooldown, "State transitions to Cooldown");
+
+    // 3. Cooldown completes: Cooldown -> Casting
+    ok = fsm.handleEvent(FishingEvent::CooldownComplete);
+    TEST_ASSERT(ok, "CooldownComplete event accepted in Cooldown");
+    TEST_ASSERT(fsm.getState() == FishingState::Casting, "State transitions to Casting");
+
+    return true;
+}
+
+/**
+ * @brief Test 13: Production FSM Pause, Resume, and Stop Flow via FishingStateMachine
+ */
+bool test_fsm_pause_resume_flow() {
+    using namespace paxg::fishing;
+
+    FishingStateMachine fsm(FishingState::Waiting);
+
+    // 1. Pause active fishing: Waiting -> Paused
+    bool ok = fsm.handleEvent(FishingEvent::Pause);
+    TEST_ASSERT(ok, "Pause event accepted in Waiting");
+    TEST_ASSERT(fsm.getState() == FishingState::Paused, "State transitions to Paused");
+
+    // 2. In Paused state, bite or cast events must be rejected
+    TEST_ASSERT(!fsm.handleEvent(FishingEvent::BiteDetected), "Paused rejects BiteDetected");
+    TEST_ASSERT(!fsm.handleEvent(FishingEvent::CastComplete), "Paused rejects CastComplete");
+    TEST_ASSERT(fsm.getState() == FishingState::Paused, "State remains Paused");
+
+    // 3. Resume fishing: Paused -> Casting
+    ok = fsm.handleEvent(FishingEvent::Resume);
+    TEST_ASSERT(ok, "Resume event accepted in Paused");
+    TEST_ASSERT(fsm.getState() == FishingState::Casting, "State transitions to Casting on Resume");
+
+    // 4. Stop from active state: Casting -> Idle
+    ok = fsm.handleEvent(FishingEvent::Stop);
+    TEST_ASSERT(ok, "Stop event accepted in Casting");
+    TEST_ASSERT(fsm.getState() == FishingState::Idle, "State transitions to Idle on Stop");
+
+    // 5. Stop while already in Idle: valid idempotent action
+    ok = fsm.handleEvent(FishingEvent::Stop);
+    TEST_ASSERT(ok, "Stop event accepted in Idle (idempotent)");
+    TEST_ASSERT(fsm.getState() == FishingState::Idle, "State remains Idle");
+
+    return true;
+}
+
+/**
+ * @brief Test 14: Production FSM Error, Disarm, and Reset Flow via FishingStateMachine
+ */
+bool test_fsm_error_and_disarm_flow() {
+    using namespace paxg::fishing;
+
+    FishingStateMachine fsm(FishingState::Waiting);
+
+    // 1. Simulate USB disconnect or subsystem fault: Waiting -> Error
+    bool ok = fsm.handleEvent(FishingEvent::Error);
+    TEST_ASSERT(ok, "Error event accepted in Waiting");
+    TEST_ASSERT(fsm.getState() == FishingState::Error, "State transitions to Error");
+
+    // 2. In Error state, Start, Resume, and Bite are strictly rejected
+    TEST_ASSERT(!fsm.handleEvent(FishingEvent::Start), "Error state rejects Start");
+    TEST_ASSERT(!fsm.handleEvent(FishingEvent::Resume), "Error state rejects Resume");
+    TEST_ASSERT(!fsm.handleEvent(FishingEvent::BiteDetected), "Error state rejects BiteDetected");
+    TEST_ASSERT(fsm.getState() == FishingState::Error, "State remains Error");
+
+    // 3. User Stop/Reset clears Error: Error -> Idle
+    ok = fsm.handleEvent(FishingEvent::Stop);
+    TEST_ASSERT(ok, "Stop event clears Error state");
+    TEST_ASSERT(fsm.getState() == FishingState::Idle, "State transitions to Idle on Stop");
+
+    return true;
+}
+
+/**
+ * @brief Test 15: Production FSM Invalid Transitions Systematic Rejection
+ */
+bool test_fsm_invalid_transitions_rejection() {
+    using namespace paxg::fishing;
+
+    // Test Idle: cannot advance without Start or Stop
+    FishingStateMachine fsmIdle(FishingState::Idle);
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::CastComplete), "Idle rejects CastComplete");
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::BiteDetected), "Idle rejects BiteDetected");
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::BiteTimeout), "Idle rejects BiteTimeout");
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::ReelTrigger), "Idle rejects ReelTrigger");
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::ReelComplete), "Idle rejects ReelComplete");
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::CooldownComplete), "Idle rejects CooldownComplete");
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::TimeoutComplete), "Idle rejects TimeoutComplete");
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::Resume), "Idle rejects Resume");
+    TEST_ASSERT(!fsmIdle.handleEvent(FishingEvent::Pause), "Idle rejects Pause");
+    TEST_ASSERT(fsmIdle.getState() == FishingState::Idle, "State unchanged after invalid events");
+
+    // Test Casting: rejects invalid forward jumps
+    FishingStateMachine fsmCast(FishingState::Casting);
+    TEST_ASSERT(!fsmCast.handleEvent(FishingEvent::Start), "Casting rejects Start");
+    TEST_ASSERT(!fsmCast.handleEvent(FishingEvent::BiteDetected), "Casting rejects BiteDetected");
+    TEST_ASSERT(!fsmCast.handleEvent(FishingEvent::BiteTimeout), "Casting rejects BiteTimeout");
+    TEST_ASSERT(!fsmCast.handleEvent(FishingEvent::ReelTrigger), "Casting rejects ReelTrigger");
+    TEST_ASSERT(!fsmCast.handleEvent(FishingEvent::ReelComplete), "Casting rejects ReelComplete");
+    TEST_ASSERT(!fsmCast.handleEvent(FishingEvent::CooldownComplete), "Casting rejects CooldownComplete");
+    TEST_ASSERT(!fsmCast.handleEvent(FishingEvent::TimeoutComplete), "Casting rejects TimeoutComplete");
+    TEST_ASSERT(!fsmCast.handleEvent(FishingEvent::Resume), "Casting rejects Resume");
+    TEST_ASSERT(fsmCast.getState() == FishingState::Casting, "State unchanged after invalid events");
+
+    // Test Waiting: rejects premature reel completion
+    FishingStateMachine fsmWait(FishingState::Waiting);
+    TEST_ASSERT(!fsmWait.handleEvent(FishingEvent::Start), "Waiting rejects Start");
+    TEST_ASSERT(!fsmWait.handleEvent(FishingEvent::CastComplete), "Waiting rejects CastComplete");
+    TEST_ASSERT(!fsmWait.handleEvent(FishingEvent::ReelTrigger), "Waiting rejects ReelTrigger");
+    TEST_ASSERT(!fsmWait.handleEvent(FishingEvent::ReelComplete), "Waiting rejects ReelComplete");
+    TEST_ASSERT(!fsmWait.handleEvent(FishingEvent::CooldownComplete), "Waiting rejects CooldownComplete");
+    TEST_ASSERT(!fsmWait.handleEvent(FishingEvent::TimeoutComplete), "Waiting rejects TimeoutComplete");
+    TEST_ASSERT(!fsmWait.handleEvent(FishingEvent::Resume), "Waiting rejects Resume");
+    TEST_ASSERT(fsmWait.getState() == FishingState::Waiting, "State unchanged after invalid events");
+
+    // Test BiteDetected: rejects out-of-order events
+    FishingStateMachine fsmBite(FishingState::BiteDetected);
+    TEST_ASSERT(!fsmBite.handleEvent(FishingEvent::Start), "BiteDetected rejects Start");
+    TEST_ASSERT(!fsmBite.handleEvent(FishingEvent::CastComplete), "BiteDetected rejects CastComplete");
+    TEST_ASSERT(!fsmBite.handleEvent(FishingEvent::BiteDetected), "BiteDetected rejects BiteDetected");
+    TEST_ASSERT(!fsmBite.handleEvent(FishingEvent::BiteTimeout), "BiteDetected rejects BiteTimeout");
+    TEST_ASSERT(!fsmBite.handleEvent(FishingEvent::ReelComplete), "BiteDetected rejects ReelComplete");
+    TEST_ASSERT(!fsmBite.handleEvent(FishingEvent::CooldownComplete), "BiteDetected rejects CooldownComplete");
+    TEST_ASSERT(!fsmBite.handleEvent(FishingEvent::TimeoutComplete), "BiteDetected rejects TimeoutComplete");
+    TEST_ASSERT(!fsmBite.handleEvent(FishingEvent::Resume), "BiteDetected rejects Resume");
+    TEST_ASSERT(fsmBite.getState() == FishingState::BiteDetected, "State unchanged after invalid events");
+
+    // Test Reeling: rejects start or bite events
+    FishingStateMachine fsmReel(FishingState::Reeling);
+    TEST_ASSERT(!fsmReel.handleEvent(FishingEvent::Start), "Reeling rejects Start");
+    TEST_ASSERT(!fsmReel.handleEvent(FishingEvent::CastComplete), "Reeling rejects CastComplete");
+    TEST_ASSERT(!fsmReel.handleEvent(FishingEvent::BiteDetected), "Reeling rejects BiteDetected");
+    TEST_ASSERT(!fsmReel.handleEvent(FishingEvent::BiteTimeout), "Reeling rejects BiteTimeout");
+    TEST_ASSERT(!fsmReel.handleEvent(FishingEvent::ReelTrigger), "Reeling rejects ReelTrigger");
+    TEST_ASSERT(!fsmReel.handleEvent(FishingEvent::CooldownComplete), "Reeling rejects CooldownComplete");
+    TEST_ASSERT(!fsmReel.handleEvent(FishingEvent::TimeoutComplete), "Reeling rejects TimeoutComplete");
+    TEST_ASSERT(!fsmReel.handleEvent(FishingEvent::Resume), "Reeling rejects Resume");
+    TEST_ASSERT(fsmReel.getState() == FishingState::Reeling, "State unchanged after invalid events");
+
+    // Test Cooldown: rejects non-cooldown completion events
+    FishingStateMachine fsmCd(FishingState::Cooldown);
+    TEST_ASSERT(!fsmCd.handleEvent(FishingEvent::Start), "Cooldown rejects Start");
+    TEST_ASSERT(!fsmCd.handleEvent(FishingEvent::CastComplete), "Cooldown rejects CastComplete");
+    TEST_ASSERT(!fsmCd.handleEvent(FishingEvent::BiteDetected), "Cooldown rejects BiteDetected");
+    TEST_ASSERT(!fsmCd.handleEvent(FishingEvent::BiteTimeout), "Cooldown rejects BiteTimeout");
+    TEST_ASSERT(!fsmCd.handleEvent(FishingEvent::ReelTrigger), "Cooldown rejects ReelTrigger");
+    TEST_ASSERT(!fsmCd.handleEvent(FishingEvent::ReelComplete), "Cooldown rejects ReelComplete");
+    TEST_ASSERT(!fsmCd.handleEvent(FishingEvent::TimeoutComplete), "Cooldown rejects TimeoutComplete");
+    TEST_ASSERT(!fsmCd.handleEvent(FishingEvent::Resume), "Cooldown rejects Resume");
+    TEST_ASSERT(fsmCd.getState() == FishingState::Cooldown, "State unchanged after invalid events");
+
+    // Test Timeout: rejects start or bite events
+    FishingStateMachine fsmTo(FishingState::Timeout);
+    TEST_ASSERT(!fsmTo.handleEvent(FishingEvent::Start), "Timeout rejects Start");
+    TEST_ASSERT(!fsmTo.handleEvent(FishingEvent::CastComplete), "Timeout rejects CastComplete");
+    TEST_ASSERT(!fsmTo.handleEvent(FishingEvent::BiteDetected), "Timeout rejects BiteDetected");
+    TEST_ASSERT(!fsmTo.handleEvent(FishingEvent::BiteTimeout), "Timeout rejects BiteTimeout");
+    TEST_ASSERT(!fsmTo.handleEvent(FishingEvent::ReelTrigger), "Timeout rejects ReelTrigger");
+    TEST_ASSERT(!fsmTo.handleEvent(FishingEvent::ReelComplete), "Timeout rejects ReelComplete");
+    TEST_ASSERT(!fsmTo.handleEvent(FishingEvent::CooldownComplete), "Timeout rejects CooldownComplete");
+    TEST_ASSERT(!fsmTo.handleEvent(FishingEvent::Resume), "Timeout rejects Resume");
+    TEST_ASSERT(fsmTo.getState() == FishingState::Timeout, "State unchanged after invalid events");
+
+    return true;
+}
+
+/**
  * @brief Master Test Runner
  */
 int run_all_audio_detector_tests() {
     std::printf("====================================================\n");
-    std::printf("  PAXG-ticker Audio Detector Unit Tests (Phase 5)   \n");
+    std::printf("  PAXG-ticker Audio Detector Unit Tests (Phase 5-7) \n");
     std::printf("====================================================\n");
 
     g_testsRun = 0;
@@ -400,6 +693,12 @@ int run_all_audio_detector_tests() {
     RUN_TEST(test_cooldown_rejection);
     RUN_TEST(test_cooldown_expiration_and_rearm);
     RUN_TEST(test_synthetic_scenario_end_to_end);
+    RUN_TEST(test_fishing_settings_bounds_clamping);
+    RUN_TEST(test_fsm_normal_bite_flow);
+    RUN_TEST(test_fsm_timeout_flow);
+    RUN_TEST(test_fsm_pause_resume_flow);
+    RUN_TEST(test_fsm_error_and_disarm_flow);
+    RUN_TEST(test_fsm_invalid_transitions_rejection);
 
     std::printf("----------------------------------------------------\n");
     std::printf("Results: %d/%d passed, %d failed\n", g_testsPassed, g_testsRun, g_testsFailed);
