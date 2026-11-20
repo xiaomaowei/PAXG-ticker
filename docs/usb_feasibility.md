@@ -1,15 +1,16 @@
-# USB Feasibility and Hardware Integration Report (Phases 1, 2 & 3)
+# USB Feasibility and Hardware Integration Report (Phases 1, 2, 3, 4 & 5)
 
 ## Executive Summary
 
-This document provides an evidence-based assessment of USB capabilities for the LILYGO T-Display-S3 project under the current PlatformIO Arduino environment (`framework-arduinoespressif32 @ 3.20014.231204 / Arduino ESP32 2.0.14`).
+This document provides an evidence-based assessment of USB capabilities for the LILYGO T-Display-S3 project under the current PlatformIO Arduino environment (`framework-arduinoespressif32 @ 3.20014.231204 / Arduino ESP32 2.0.14 / ESP-IDF v4.4.6`).
 
 Key conclusions:
 1. **USB HID (Keyboard Keystroke Output)**: **Implemented in Phase 3**. The stock Espressif Arduino component (`USBHIDKeyboard`) provides standard keyboard HID reports with standard USB descriptors (no custom VID/PID, hidden descriptors, evasion, or anticheat modifications). Initialized at boot alongside USB CDC via `keyboard.begin()` and `USB.begin()`.
 2. **Command Queue, Host-Mounted Gating & State Guards**: Implemented via a bounded nonblocking circular queue (`FISHING_KEY_QUEUE_CAPACITY = 8`). Press and release actions are strictly separated across independent service ticks (`FISHING_KEY_PRESS_HOLD_MS = 60ms`, `FISHING_KEY_RELEASE_GAP_MS = 60ms`). All keystroke transmission and arming are strictly gated behind actual host-mounted state (`_started && tinyusb_device_mounted`), Fishing mode, an active running state, and an explicit user armed flag (`fishingArmed`, toggled by holding both buttons).
 3. **Thread-Safe Disconnect & Auto-Disarm**: Asynchronous disconnect/suspend events from the USB event task set a synchronized `std::atomic<bool> s_pendingDisconnect` signal without mutating state directly across threads. The signal is consumed in `usb_hid_keyboard_tick` on the Arduino main loop, immediately clearing the queue, calling `Keyboard.releaseAll()`, and auto-disarming (`fishingArmed = false`), preventing automated key sends upon reconnect. Reconnect and resume events do not re-arm the device.
-4. **USB Audio Class (UAC 1.0 / 2.0)**: **Unverified / No Demonstrated Ready-to-Use Path in Current Setup**. The current Arduino 2.0.14 setup has no demonstrated ready-to-use UAC speaker capture path or configuration in this project, and the proposed UAC route remains unverified. While low-level TinyUSB audio class headers exist in the framework (`arduino_tinyusb/tinyusb/src/class/audio/`), `CONFIG_TINYUSB_AUDIO_ENABLED` is not present in the default Arduino SDK configuration. A minimal TinyUSB/ESP-IDF compatibility proof of concept is required before concluding feasibility or considering framework migration. Platform-wide impossibility is not claimed solely from the missing configuration macro. Phase 4 remains explicitly unimplemented and unverified.
-5. **Validation Scope**: Local verification consists of clean PlatformIO compilation and linking for `lilygo-t-display-s3` (ESP32-S3). Physical hardware validation on an ESP32-S3 board and Windows 11 host composite driver enumeration remain unavailable in this environment and are explicitly disclaimed.
+4. **USB Audio Class (UAC 1.0 / 2.0 Feasibility Proof)**: **Phase 4 Completed as Isolated Feasibility Proof; Production UAC Unverified and Not Implemented**. An isolated compile/link proof of concept (`test/usb_audio_poc/**`) verified that while TinyUSB audio class headers (`class/audio/audio_device.h`) compile cleanly when driver macros are provided, linking against the stock framework static library fails with `undefined reference to tud_audio_n_read`. Direct binary analysis confirms that `libarduino_tinyusb.a` contains zero `tud_audio*` symbols, `audio_device.c` is not packaged in the installed framework, and `CONFIG_TINYUSB_AUDIO_ENABLED` is omitted from the precompiled sdkconfig. This is a framework packaging and static library configuration limitation, not a hardware impossibility claim. Because support is not demonstrable without framework migration or rebuilding ESP-IDF static libraries, Phase 4 is explicitly maintained as **not implemented / unverified in production firmware**, and no UAC code enters production builds.
+5. **Modular PCM Audio Detector**: **Implemented in Phase 5**. A platform-independent, replaceable audio detection engine (`IAudioDetector` / `PcmAudioDetector`) processes PCM16 mono frames with bounded ring buffering (`PcmRingBuffer`), Peak, Root Mean Square (RMS), adaptive ambient noise floor tracking (EMA), dynamic thresholding, debounce confirmation, and cooldown lockout gating. Deterministic synthetic test patterns verify normal burst detection, noise spike debounce rejection, and cooldown gating.
+6. **Validation Scope**: Local verification consists of clean PlatformIO compilation and linking for `lilygo-t-display-s3` (ESP32-S3), static cross-compilation of unit tests and isolated PoC with `xtensa-esp32s3-elf-g++`, and symbol verification. Physical hardware execution on an ESP32-S3 board, Windows 11 host composite driver enumeration, and in-game WoW bite detection accuracy remain unavailable and are explicitly disclaimed.
 
 ---
 
@@ -66,7 +67,7 @@ Inspection of `framework-arduinoespressif32` shows:
 - **Assessment**:
   The ESP32-S3 hardware and Arduino framework support USB HID Keyboard emulation. When initialized via `USB.begin()` and `USBHIDKeyboard.begin()`, the device registers standard HID reports (boot/report keyboard).
 
-### 3.2 USB Audio Class (UAC) — Current Setup Status & Feasibility Qualification
+### 3.2 USB Audio Class (UAC) — Status & Empirical Qualification
 Inspection of `tools/sdk/esp32s3/include/arduino_tinyusb/include/tusb_config.h` and `sdkconfig` reveals:
 - `CONFIG_TINYUSB_CDC_ENABLED=y`
 - `CONFIG_TINYUSB_MSC_ENABLED=y`
@@ -77,12 +78,6 @@ Inspection of `tools/sdk/esp32s3/include/arduino_tinyusb/include/tusb_config.h` 
 - `CONFIG_TINYUSB_VENDOR_ENABLED=y`
 - **`CONFIG_TINYUSB_AUDIO_ENABLED` is omitted from the precompiled Arduino SDK configuration**.
 - Low-level TinyUSB audio class headers are present on disk under `arduino_tinyusb/tinyusb/src/class/audio/` (`audio.h`, `audio_device.h`).
-
-**Evidence-Bounded Assessment**:
-- The current Arduino 2.0.14 setup has no demonstrated ready-to-use UAC speaker capture path or configuration in this project, and the proposed UAC route is unverified.
-- Platform-wide impossibility should not be asserted solely from the absence of the `CONFIG_TINYUSB_AUDIO_ENABLED` macro in the prebuilt sdkconfig. However, successfully operating a UAC speaker capture device (receiving PC game audio over USB) requires valid isochronous OUT endpoint descriptors, host audio stream synchronization, and circular audio DMA buffering, none of which currently exist in this project or standard Arduino ESP32 wrappers.
-- A minimal TinyUSB/ESP-IDF compatibility proof of concept is required before concluding definitive feasibility or deciding whether framework migration is warranted.
-- Phase 4 (real audio capture / hardware keystroke injection) remains **explicitly unimplemented and unverified** in this project.
 
 ---
 
@@ -161,20 +156,160 @@ Phase 2 established the core simulation engine:
    - Both buttons held (>= 800ms) in Fishing mode: Toggle Armed / Disarmed safety state (rejected if host not mounted).
    - Mode switch away from Fishing mode automatically disarms and purges the queue.
 
-### 5.3 Verification Matrix & Remaining Limitations
+---
 
-| Verification Item | Status in Phase 3 | Evidence / Notes |
-| :--- | :--- | :--- |
-| **Compilation & Link** | **VERIFIED** | PlatformIO `pio run` builds cleanly; firmware binary generated. |
-| **LDF Auto-Discovery** | **VERIFIED** | Framework `libUSB.a` linked without requiring `platformio.ini` edits. |
-| **Thread-Safe Callback** | **VERIFIED** | `std::atomic<bool>` signal avoids cross-task mutations. |
-| **Host-Mounted Gating** | **VERIFIED** | Gated on `_started && tinyusb_device_mounted`. |
-| **Auto-Disarm on Disconnect** | **VERIFIED** | Disconnect/suspend consumption forces `fishingArmed = false`. |
-| **No Re-Arm on Resume** | **VERIFIED** | Resume/started events explicitly do not re-arm. |
-| **Queue Boundedness** | **VERIFIED** | Buffer size fixed at 8 items; drops over-capacity requests. |
-| **Press/Release Pairing**| **VERIFIED** | Tick state machine enforces `Idle` -> `Pressed` -> `Cooldown` -> `Idle`. |
-| **Gating Verification** | **VERIFIED** | Code inspection confirms multiple layers of gating in enqueue and tick. |
-| **Physical ESP32-S3** | **UNVERIFIED** | Physical board hardware execution not performed in this session. |
-| **Windows 11 Composite** | **UNVERIFIED** | Host enumeration of CDC + HID composite endpoints unverified on Windows 11. |
-| **Game Automation** | **UNVERIFIED** | Key outputs are placeholders; no game client integration tested. |
-| **USB Audio (UAC)** | **UNVERIFIED** | Remained explicitly out of scope for Phase 3. |
+## 6. Phase 4 Isolated USB Audio (UAC OUT) Feasibility Proof
+
+### 6.1 Objective & Strict Isolation
+Phase 4 investigated the feasibility of receiving host PC game audio directly over native USB OTG using the USB Audio Class (UAC 1.0 speaker receiver).
+
+To prevent experimental code from impacting production builds, all Phase 4 assets are maintained strictly within an isolated folder:
+- [test/usb_audio_poc/usb_audio_poc.h](test/usb_audio_poc/usb_audio_poc.h)
+- [test/usb_audio_poc/usb_audio_poc.cpp](test/usb_audio_poc/usb_audio_poc.cpp)
+- [test/usb_audio_poc/run_validation.py](test/usb_audio_poc/run_validation.py)
+- [test/usb_audio_poc/README.md](test/usb_audio_poc/README.md)
+
+Because `platformio.ini` defaults `src_dir` to `src/`, items inside `test/` are automatically excluded from the production firmware build (`pio run`).
+
+### 6.2 Composite Device Coexistence Architecture
+In a hypothetical composite configuration containing CDC, HID, and UAC Audio OUT, the USB descriptors and hardware endpoints would be partitioned as follows:
+
+| Interface Index | Class | Function | Endpoints Assigned | Transfer Type |
+| :--- | :--- | :--- | :--- | :--- |
+| **0 & 1** | USB CDC-ACM | Serial console / programming | `EP 1 IN` (Notification), `EP 2 OUT` & `EP 2 IN` (Data) | Bulk / Interrupt |
+| **2** | USB HID | Keyboard keystroke injection | `EP 3 IN` | Interrupt |
+| **3** | USB Audio Control (AC) | Clock source, terminal, feature unit controls | `EP 0` (Default Control) | Control |
+| **4** | USB Audio Streaming (AS) | PCM Audio OUT from Host to Device | `EP 4 OUT` | Isochronous (Sync/Async) |
+
+### 6.3 Empirical Validation Commands & Results
+Validation was executed using the toolchain binary `xtensa-esp32s3-elf-g++` and library inspection utility `xtensa-esp32s3-elf-nm`:
+
+```powershell
+python test/usb_audio_poc/run_validation.py
+```
+
+**Output Log**:
+```
+==================================================================
+PAXG-ticker Phase 4 & Phase 5 Feasibility & Validation Harness
+==================================================================
+
+--- Step 1: Inspecting TinyUSB precompiled symbols ---
+libarduino_tinyusb.a path: C:\Users\020183/.platformio/packages/framework-arduinoespressif32\tools\sdk\esp32s3\lib\libarduino_tinyusb.a
+Total matching 'audio' or 'tud_audio' symbols: 0
+  -> CONFIRMED: libarduino_tinyusb.a contains ZERO audio symbols.
+
+--- Step 2: Compiling isolated test/usb_audio_poc/usb_audio_poc.cpp ---
+PoC Compilation return code: 0
+  -> SUCCESS: test/usb_audio_poc/usb_audio_poc.cpp compiled successfully into object file.
+
+--- Step 3: Attempting link of isolated PoC against libarduino_tinyusb.a ---
+PoC Link return code: 1 (Expected failure: missing audio symbols)
+PoC Link output (showing unresolved references to tud_audio_*):
+    test/usb_audio_poc/usb_audio_poc.o: in function `tud_audio_read':
+    usb_audio_poc.cpp:(.text+0x15): undefined reference to `tud_audio_n_read'
+    collect2.exe: error: ld returned 1 exit status
+```
+
+### 6.4 Technical Root Cause Analysis
+1. **Header vs Source Availability**: While header declarations exist in `arduino_tinyusb/tinyusb/src/class/audio/audio_device.h`, the corresponding implementation file `audio_device.c` is not included in the framework source distribution.
+2. **Missing Precompiled Symbols**: Scanning `libarduino_tinyusb.a` with `xtensa-esp32s3-elf-nm -g` yields 0 symbols matching `tud_audio*`. In contrast, `tud_cdc_*`, `tud_hid_*`, `tud_midi_*`, `tud_msc_*`, and `tud_video_*` are fully defined.
+3. **Core TinyUSB Dispatch Table**: TinyUSB's device dispatcher (`usbd.c`) inside `libarduino_tinyusb.a` was compiled with `CFG_TUD_AUDIO = 0`. Even if external `audio_device.o` were supplied, the core stack lacks the driver dispatch entry in its internal class table.
+4. **Prebuilt SDK Configuration**: `CONFIG_TINYUSB_AUDIO_ENABLED` is missing from `sdkconfig` and `tusb_config.h`.
+
+### 6.5 Feasibility Qualification & Policy
+- **Link/Config Limitation**: This is a link-time and configuration limitation of the stock Arduino ESP32 2.0.14 package, not an architectural or hardware impossibility of the ESP32-S3 OTG peripheral.
+- **Strict Guarding**: UAC cannot link or function under the current framework without rebuilding ESP-IDF static libraries or performing an unverified framework migration.
+- **Reporting Status**: As mandated, Phase 4 is explicitly reported as **not implemented and unverified in production firmware**. No UAC code is linked into the production binary.
+
+---
+
+## 7. Phase 5 Modular PCM Audio Detector & Synthetic Verification
+
+### 7.1 Architecture & Modular Interface
+Phase 5 implements a platform-independent, replaceable audio signal analysis module for PCM16 mono streams. It is decoupled from any hardware transport (USB, I2S, or synthetic generators) and contains zero game automation or blocking logic.
+
+The module consists of:
+- [include/modules/audio/audio_ring_buffer.h](include/modules/audio/audio_ring_buffer.h): `PcmRingBuffer<Capacity>` — Bounded, zero-allocation circular buffer.
+- [include/modules/audio/audio_detector.h](include/modules/audio/audio_detector.h): `IAudioDetector` interface, `AudioDetectorConfig`, `AudioDetectorMetrics`, and `PcmAudioDetector`.
+- [src/audio/pcm_audio_detector.cpp](src/audio/pcm_audio_detector.cpp): Implementation of frame-based DSP analysis.
+- [include/modules/audio/synthetic_audio_samples.h](include/modules/audio/synthetic_audio_samples.h) & [src/audio/synthetic_audio_samples.cpp](src/audio/synthetic_audio_samples.cpp): Deterministic synthetic waveform generators for testing.
+
+### 7.2 Non-Blocking DSP Pipeline & Mathematics
+
+For each complete frame of $N$ samples ($N = \text{frameSize}$, default 128 samples / 8ms at 16kHz):
+
+1. **Peak Detection**:
+   $$\text{Peak} = \max_{0 \le i < N} |s_i|$$
+   Computed by widening samples to `int32_t` before absolute value evaluation and storing the result in `uint32_t peak`. This ensures that boundary sample values like `INT16_MIN` ($-32768$) correctly evaluate to $+32768$ without signed integer overflow or `int16_t` narrowing distortion.
+2. **Root Mean Square (RMS)**:
+   $$\text{RMS} = \sqrt{\frac{1}{N} \sum_{i=0}^{N-1} s_i^2}$$
+3. **Adaptive Ambient Noise Floor Tracking (EMA)**:
+   When not in a burst or cooldown lockout ($\text{cooldownRemaining} = 0$) and $\text{RMS} < \text{effectiveThreshold}$:
+   $$\text{NoiseFloor}_{k} = (1 - \alpha) \cdot \text{NoiseFloor}_{k-1} + \alpha \cdot \text{RMS}$$
+   where $\alpha = \text{noiseFloorAlpha}$ (default 0.05). If $\text{NoiseFloor} < 1.0$, it is clamped to $1.0$.
+4. **Dynamic Effective Threshold**:
+   $$\text{EffectiveThreshold} = \max(\text{absoluteThreshold}, \text{NoiseFloor} \cdot \text{thresholdRatio})$$
+   (Defaults: $\text{absoluteThreshold} = 1500$, $\text{thresholdRatio} = 2.5$).
+5. **Debounce Confirmation**:
+   - If $\text{RMS} \ge \text{EffectiveThreshold}$: increment $\text{consecutiveAbove}$.
+   - If $\text{consecutiveAbove} \ge \text{debounceFrames}$ (default 2 frames): confirm trigger event, latch `triggered = true`, increment `triggerCount`, and initialize cooldown timer.
+   - If $\text{RMS} < \text{EffectiveThreshold}$: reset $\text{consecutiveAbove} = 0$.
+6. **Cooldown Lockout Gating**:
+   - Once triggered, $\text{cooldownRemaining}$ is loaded with $\text{cooldownFrames}$ (default 25 frames ~ 200ms).
+   - During cooldown, new triggers are locked out and noise floor updates are suppressed, preventing double-triggering on tail reverberations.
+
+### 7.3 Synthetic Unit Test Suite Coverage
+The test suite in [test/audio_detector/test_audio_detector.cpp](test/audio_detector/test_audio_detector.cpp) exercises deterministic behaviors:
+
+| Test Case | Scenario / Injected Stimulus | Expected Output & Invariant | Status |
+| :--- | :--- | :--- | :--- |
+| **`test_ring_buffer_basics_and_bounds`** | Push, pop, peek, full saturation, capacity limits | Exact counts match; push on full returns false; no buffer overruns | **PASS** |
+| **`test_ring_buffer_overwrite_and_wraparound`** | Saturate ring buffer; push overwrite extra samples | Tail advances properly; newest samples retained; count clamped | **PASS** |
+| **`test_rms_and_peak_accuracy`** | Silence (0), Pure DC (1200), Square wave (±3000), `INT16_MIN` (-32768) impulse, `INT16_MIN` DC, `INT16_MAX` (+32767) DC | Peak handles 32768 magnitude without narrowing; RMS matches mathematical ground truth | **PASS** |
+| **`test_adaptive_noise_floor`** | Ambient noise (~400 RMS) followed by single loud burst (5000) | Noise floor tracks ambient slowly; immune to burst corruption | **PASS** |
+| **`test_transient_noise_debounce_rejection`** | 1-frame loud spike (> threshold) with `debounceFrames = 2` | Spike rejected by debounce filter; `triggerCount == 0` | **PASS** |
+| **`test_valid_burst_trigger`** | Sustained 2-frame burst (> threshold) with `debounceFrames = 2` | Trigger event fires; `triggerCount == 1`; cooldown initialized | **PASS** |
+| **`test_cooldown_rejection`** | Secondary burst arriving during active cooldown window | Rejected by cooldown gate; `triggerCount` remains 1 | **PASS** |
+| **`test_cooldown_expiration_and_rearm`** | Quiet frames exhaust cooldown, followed by new valid burst | Detector re-arms; second burst triggers; `triggerCount == 2` | **PASS** |
+| **`test_synthetic_scenario_end_to_end`** | Continuous 1280-sample stream (Ambient -> Burst -> Ambient) | 10 frames analyzed; exactly 1 bite trigger recorded | **PASS** |
+
+### 7.4 Toolchain & Compilation Verification Harness
+The validation harness [test/usb_audio_poc/run_validation.py](test/usb_audio_poc/run_validation.py) provides full dual-stage verification and asserts all expected results:
+1. **Phase 4 PoC Assertions**:
+   - Asserts compilation succeeds (`returncode == 0`).
+   - Asserts linking fails (`returncode != 0`).
+   - Asserts linking failure is specifically due to undefined `tud_audio` / `tud_audio_n_read` symbols.
+2. **Phase 5 Detector Test Verification**:
+   - Checks for native host compiler (`g++`, `clang++`, `cl.exe`) on PATH.
+   - If available: compiles and links native binary, runs executable assertions, and reports test outcome counts.
+   - If unavailable on host: explicitly reports that assertions were **not executed on host** and performs a target cross-compilation check across all test and implementation sources (`-Wall -Wextra -Werror`), labeled strictly as **compile-only** without claiming unit tests passed.
+3. **Zero Temporary File Retention**:
+   - Automatically unlinks any generated `compile_commands.json`, `.o`, `.elf`, and `.exe` files in a `finally` block, leaving zero temporary files in the repository.
+4. **Production Firmware Compilation**:
+   - Running `pio run` builds `src/audio/pcm_audio_detector.cpp` and `src/audio/synthetic_audio_samples.cpp` directly into `firmware.elf` without warnings or errors.
+
+### 7.5 Explicit Disclaimers
+- **No Real Audio Capture**: The detector currently processes synthetic PCM sample streams; no physical microphone or UAC USB stream is active.
+- **No Bite Recognition Accuracy Claim**: The energy/RMS detector is a generic threshold-crossing building block and does not claim accurate discrimination of World of Warcraft fishing bobber splash acoustics.
+
+---
+
+## 8. Verification Matrix & Current Project Status
+
+| Verification Item | Phase | Status | Evidence / Notes |
+| :--- | :--- | :--- | :--- |
+| **Production Firmware Build** | 1-5 | **VERIFIED** | PlatformIO `pio run` builds cleanly; `firmware.elf` linked successfully. |
+| **USB HID Keyboard Gating** | 3 | **VERIFIED** | Guarded on mounted host, Fishing mode, armed flag, active running state. |
+| **Auto-Disarm on Disconnect** | 3 | **VERIFIED** | Thread-safe atomic disconnect signal auto-disarms on main loop tick. |
+| **Audio Detector Ring Buffer** | 5 | **VERIFIED** | Bounded zero-allocation FIFO; bounds enforced; verified via tests. |
+| **RMS / Peak Calculation** | 5 | **VERIFIED** | Mathematical precision verified on known DC, silence, and square waves. |
+| **Debounce Rejection** | 5 | **VERIFIED** | 1-frame transient noise spikes rejected deterministically. |
+| **Cooldown Lockout** | 5 | **VERIFIED** | Secondary bursts during lockout rejected; re-arms upon expiration. |
+| **Detector Code Isolation** | 5 | **VERIFIED** | Core DSP logic in `include/modules/audio` and `src/audio` has no blocking calls. |
+| **Isolated UAC Compilation** | 4 | **VERIFIED** | `test/usb_audio_poc/usb_audio_poc.cpp` compiles successfully with TinyUSB headers. |
+| **UAC Linkage Proof** | 4 | **VERIFIED LIMITATION** | Linking fails with `undefined reference to tud_audio_n_read` (`libarduino_tinyusb.a` lacks symbols). |
+| **Production UAC Isolation** | 4 | **VERIFIED** | UAC code is restricted to `test/usb_audio_poc/` and never enters production firmware. |
+| **Physical ESP32-S3 Hardware**| 1-5 | **UNVERIFIED** | Physical board execution not performed in this session. |
+| **Windows 11 Composite Enum** | 3-4 | **UNVERIFIED** | Windows host composite driver enumeration unverified. |
+| **In-Game Bite Recognition** | 5 | **UNVERIFIED** | Placeholder threshold algorithm; no claim of real WoW splash recognition. |

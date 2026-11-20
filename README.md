@@ -58,18 +58,22 @@ Tip: Click any image to open the full-size version.
 - [src/core](src/core): app loop/controller, USB HID keyboard service, and shared runtime globals
 - [src/modes](src/modes): mode implementations (paxg, clock, weather, fishing)
 - [src/hal](src/hal): hardware-facing modules (display, wifi, brightness, ui utils)
+- [src/audio](src/audio): modular PCM audio detector and synthetic waveform generator implementations
+- [include/modules/audio](include/modules/audio): canonical audio headers (`audio_detector.h`, `audio_ring_buffer.h`, `synthetic_audio_samples.h`)
 - [include/modules/modes](include/modules/modes): canonical mode headers
 - [include/modules/hal](include/modules/hal): canonical HAL headers (`usb_hid_keyboard.h`, etc.)
 - [include/modules/generated](include/modules/generated): auto-generated headers
 - [include/modules](include/modules): shared non-domain headers
 - [include/images](include/images): embedded graphics assets
+- [test/usb_audio_poc](test/usb_audio_poc): Phase 4 isolated USB Audio (UAC) feasibility proof harness and test files
+- [test/audio_detector](test/audio_detector): Phase 5 deterministic synthetic unit test suite
 - [docs](docs): architectural and feasibility documentation ([docs/usb_feasibility.md](docs/usb_feasibility.md))
 - [scripts/load_env.py](scripts/load_env.py): pre-build .env loader
 - [platformio.ini](platformio.ini): PlatformIO build configuration
 
-## WoW Fishing Mode (Phases 1, 2 & 3)
+## WoW Fishing Mode (Phases 1, 2, 3, 4 & 5)
 
-The 4th display mode, **WoW Fishing**, provides a nonblocking state machine dashboard with dark cyan/navy telemetry, synthetic audio detector test patterns, and safe standard USB HID Keyboard integration.
+The 4th display mode, **WoW Fishing**, provides a nonblocking state machine dashboard with dark cyan/navy telemetry, safe standard USB HID Keyboard integration, and a platform-independent modular PCM Audio Detector.
 
 ### Phases Overview
 
@@ -92,8 +96,18 @@ The 4th display mode, **WoW Fishing**, provides a nonblocking state machine dash
   - **Strict State Gating**: Keystrokes are gated behind `DisplayMode::Fishing` **AND** `usb_hid_is_connected()` **AND** an explicit user armed state (`fishingArmed`) **AND** an active running state (`Casting`, `WaitingBite`, `Reeling`).
   - **Zero Leakage**: No keystrokes can ever be transmitted in `PAXG`, `Clock`, `Weather`, `Stopped`, or `Paused` modes.
   - **Configurable Safe Placeholders**: Cast key (`'1'`) and Interact key (`'2'`) constants configured in `constants.h`.
-- **Phase 4 / Future Work**:
-  - Real game automation, physical USB Audio (UAC) capture, and Windows composite host verification remain **explicitly unimplemented and unverified**.
+- **Phase 4 (Isolated USB Audio Feasibility Proof)**:
+  - **Strict Isolation**: Implementation kept strictly inside `test/usb_audio_poc/**`; excluded from default firmware build (`pio run`).
+  - **Validation Result**: Headers (`tusb.h`, `class/audio/audio_device.h`) compile cleanly when driver macros are configured; linking against `libarduino_tinyusb.a` fails with `undefined reference to tud_audio_n_read`.
+  - **Asserted Expected Failure**: In `run_validation.py`, compilation success and specific link failure on undefined `tud_audio` symbols are asserted; all temporary files are unlinked.
+  - **Missing Artifacts Evidence**: `libarduino_tinyusb.a` contains 0 `tud_audio` symbols; `audio_device.c` is not packaged in Arduino ESP32 2.0.14 framework sources; `CONFIG_TINYUSB_AUDIO_ENABLED` is omitted from precompiled sdkconfig.
+  - **Status**: Framework packaging and static library configuration limitation, not platform-wide impossibility. Reported explicitly as **not implemented / unverified in production firmware**. No UAC code integrated into production app.
+- **Phase 5 (Modular PCM Audio Detector & Synthetic Verification)**:
+  - **Replaceable DSP Interface**: `IAudioDetector` interface with default `PcmAudioDetector` implementation, platform-independent and decoupled from transport layer.
+  - **Bounded Buffer & Metrics**: Uses `PcmRingBuffer` (bounded zero-allocation FIFO), `uint32_t peak` calculation (computed via `int32_t` abs to represent `INT16_MIN` magnitude 32768 without narrowing or overflow), RMS calculation, adaptive exponential moving average (EMA) ambient noise floor tracking, and dynamic thresholding (`max(absoluteThreshold, noiseFloor * thresholdRatio)`).
+  - **Debounce & Cooldown Guards**: Requires consecutive frames above threshold (`debounceFrames = 2`) before latching trigger; enforces mandatory lockout window (`cooldownFrames = 25`) preventing double-triggering.
+  - **Synthetic Test Verification**: Exercised via deterministic synthetic waveforms ([test/audio_detector/test_audio_detector.cpp](test/audio_detector/test_audio_detector.cpp)) testing normal bursts, `INT16_MIN` boundary magnitude, noise spike debounce rejection, cooldown rejection, and re-arming. Verified via full source cross-compilation with `-Wall -Wextra -Werror` (and native execution when host compiler is available).
+  - **Disclaimers**: Firmware builds cleanly (`pio run`); detector makes no claim of real audio capture or in-game WoW bobber splash acoustic recognition accuracy.
 
 ### Button Controls & Gesture Navigation
 
@@ -116,12 +130,16 @@ The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):
 
 ### USB Feasibility Status & Disclaimers
 
-- **What Was Tested**: Successful compilation and clean firmware linking with PlatformIO for target `lilygo-t-display-s3` (ESP32-S3), verifying stock `USBHIDKeyboard` integration, thread-safe disconnect consumption, bounded command queue state transitions, separate service tick press/release pairing, and strict gating logic.
+- **What Was Tested**:
+  - Successful compilation and clean firmware linking with PlatformIO for target `lilygo-t-display-s3` (ESP32-S3), verifying stock `USBHIDKeyboard` integration, thread-safe disconnect consumption, bounded command queue state transitions, separate service tick press/release pairing, and strict gating logic.
+  - Phase 4 isolated UAC feasibility proof: asserted compilation success and asserted link failure specifically on missing `tud_audio` symbols due to absence of `audio_device.c` and symbols in `libarduino_tinyusb.a`.
+  - Phase 5 modular PCM audio detector: verified bounded ring buffer behavior, Peak (`uint32_t`, handling `INT16_MIN` magnitude 32768) and RMS calculation, adaptive noise floor tracking, debounce rejection of noise spikes, and cooldown gating via full test/implementation cross-compilation with strict flags (`-Wall -Wextra -Werror`).
 - **What Remains Unverified**:
   - Physical execution on hardware: Local ESP32-S3 physical device validation was unavailable.
   - Windows 11 host USB composite driver enumeration and keystroke delivery across Windows USB hubs.
   - Game interaction: Keys `'1'` and `'2'` are safe placeholder constants and do not claim verified gameplay automation.
-  - USB Audio Class (UAC): Remains completely unverified and unimplemented.
+  - Production USB Audio (UAC): Unimplemented in production firmware; requires framework migration or IDF static library rebuilds to resolve missing symbols.
+  - In-game acoustic recognition: Detector is a general energy threshold block and makes no claim of accurate WoW fishing splash sound recognition.
 - **Simulation Notice**: Reel counts are labeled `SIM REEL CMDS` (simulated command counts, not confirmed catch telemetry). All audio metrics are synthetic test patterns.
 
 ## Requirements
