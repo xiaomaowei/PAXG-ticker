@@ -9,10 +9,32 @@ enum class DisplayMode : int
     PAXG = 0,
     Clock = 1,
     Weather = 2,
+    Fishing = 3,
+};
+
+enum class FishingState : int
+{
+    Stopped = 0,
+    Casting = 1,
+    WaitingBite = 2,
+    Reeling = 3,
+    Paused = 4,
 };
 
 extern DisplayMode mode;
 extern bool changed_mode;
+
+extern FishingState fishingState;
+extern unsigned long fishingStateStartTime;
+extern unsigned long fishingSessionStartTime;
+extern unsigned long fishingTotalUptimeMs;
+extern unsigned int fishingSimReelCmds;
+extern unsigned int fishingSimTimeouts;
+extern float fishingSimAudioLevel;
+extern float fishingSimAudioThreshold;
+extern bool fishingAudioDetected;
+extern unsigned long fishingNextBiteDelayMs;
+extern unsigned long fishingWaitMaxMs;
 
 extern int angle;
 extern int angleMax;

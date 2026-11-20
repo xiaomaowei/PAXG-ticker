@@ -6,6 +6,18 @@
 DisplayMode mode = DisplayMode::PAXG;
 bool changed_mode = true;
 
+FishingState fishingState = FishingState::Stopped;
+unsigned long fishingStateStartTime = 0;
+unsigned long fishingSessionStartTime = 0;
+unsigned long fishingTotalUptimeMs = 0;
+unsigned int fishingSimReelCmds = 0;
+unsigned int fishingSimTimeouts = 0;
+float fishingSimAudioLevel = 0.0f;
+float fishingSimAudioThreshold = 0.75f;
+bool fishingAudioDetected = false;
+unsigned long fishingNextBiteDelayMs = 0;
+unsigned long fishingWaitMaxMs = 20000UL;
+
 int angle = 0;
 int angleMax = 30;
 int angleMin = -5;

@@ -20,3 +20,4 @@ TFT_eSprite temperature = TFT_eSprite(&tft);
 TFT_eSprite temperatureExtremes = TFT_eSprite(&tft);
 TFT_eSprite temperatureRange = TFT_eSprite(&tft);
 TFT_eSprite rainChart = TFT_eSprite(&tft);
+TFT_eSprite fishing_display = TFT_eSprite(&tft);

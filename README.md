@@ -8,7 +8,8 @@ PAXG-ticker is an ESP32 firmware project for the LILYGO T-Display S3. The device
 - Animated PAXG mode with chart and session panel
 - Digital clock mode
 - Weather mode
-- Button-based mode switching
+- Simulated WoW Fishing mode (Phase 2 dashboard & nonblocking state machine)
+- Button-based mode switching with gesture affordances
 
 ## Market Data Source
 
@@ -54,15 +55,60 @@ Tip: Click any image to open the full-size version.
 ## Repository Layout
 
 - [src/core](src/core): app loop/controller and shared runtime globals
-- [src/modes](src/modes): mode implementations (paxg, clock, weather)
+- [src/modes](src/modes): mode implementations (paxg, clock, weather, fishing)
 - [src/hal](src/hal): hardware-facing modules (display, wifi, brightness, ui utils)
 - [include/modules/modes](include/modules/modes): canonical mode headers
 - [include/modules/hal](include/modules/hal): canonical HAL headers
 - [include/modules/generated](include/modules/generated): auto-generated headers
 - [include/modules](include/modules): shared non-domain headers
 - [include/images](include/images): embedded graphics assets
+- [docs](docs): architectural and feasibility documentation ([docs/usb_feasibility.md](docs/usb_feasibility.md))
 - [scripts/load_env.py](scripts/load_env.py): pre-build .env loader
 - [platformio.ini](platformio.ini): PlatformIO build configuration
+
+## WoW Fishing Mode (Phase 1 & Phase 2)
+
+A 4th display mode, **WoW Fishing (Simulation)**, provides a nonblocking simulated dashboard with dark cyan/navy telemetry, synthetic audio detector test data, and dedicated button gestures.
+
+### Phases Overview
+
+- **Phase 1 (Feasibility & Architecture)**:
+  - Technical analysis of the ESP32-S3 USB subsystem under PlatformIO and Arduino ESP32 2.0.14.
+  - Verified USB HID feasibility (via TinyUSB) while qualifying USB Audio status: current Arduino 2.0.14 setup has no demonstrated ready-to-use UAC speaker capture path or configuration in this project, and the proposed route is unverified.
+  - Noted that a minimal TinyUSB/ESP-IDF compatibility proof is required before concluding feasibility or considering migration (avoiding categorical platform-wide impossibility claims solely from missing configuration macros).
+  - Detailed findings documented in [docs/usb_feasibility.md](docs/usb_feasibility.md).
+- **Phase 2 (Simulated Dashboard & State Machine)**:
+  - Nonblocking state machine: `STOPPED` -> `CASTING` -> `WAITING BITE` -> `REELING`.
+  - Synthetic audio test data simulating ambient water noise floor (~15-25%) with scheduled bite spike events (~85-95%) crossing the 75% threshold.
+  - Low-flicker 320x170 rendering using `fishing_display` sprite.
+  - Compatible button gesture system preserving global mode navigation.
+- **Phase 4 / Future Work**:
+  - Real audio capture and USB keystroke automation remain **explicitly unimplemented and unverified**.
+
+### Button Controls & Gesture Navigation
+
+The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):
+
+| Gesture | Active Modes | Action |
+| :--- | :--- | :--- |
+| **Short Press UP (< 800ms)** | All modes (on release) | Cycle mode forward: `PAXG -> Clock -> Weather -> Fishing -> PAXG` |
+| **Short Press DOWN (< 800ms)** | All modes (on release) | Cycle mode backward: `PAXG -> Fishing -> Weather -> Clock -> PAXG` |
+| **Long Press UP (Hold >= 800ms)** | Fishing Mode only | **Toggle Start / Pause / Resume** simulation |
+| **Long Press DOWN (Hold >= 800ms)** | Fishing Mode only | **Stop** simulation (1st hold) / **Reset** counters (2nd hold) |
+
+#### Debounce and Release Behavior
+- **Debounce**: 50ms contact debounce filter applied to both button inputs to eliminate chatter.
+- **Release-Triggered Navigation**: Short-press mode cycling triggers strictly on button release if the press duration was under 800ms and no long-press action fired.
+- **Long-Press Protection**: In Fishing mode, holding for >= 800ms fires the start/pause or stop action immediately and sets an internal flag so that releasing the button does not trigger a mode cycle.
+- **Setup Isolation**: Wi-Fi selection and keyboard input routines in `src/hal/utils.cpp` execute inside `app_setup()` prior to `app_loop()` and do not interact with runtime mode switching.
+
+### USB Feasibility Status & Disclaimers
+
+- **USB HID**: Feasible for Phase 3 via TinyUSB, but currently **unimplemented and disabled** in Phase 2.
+- **USB Audio (UAC)**: Current Arduino 2.0.14 setup has no demonstrated ready-to-use UAC speaker capture path or configuration in this project; this route is unverified, and a minimal TinyUSB/ESP-IDF compatibility proof is required before concluding feasibility or migrating.
+- **Phase 4 Status**: Real audio detection and hardware USB automation are explicitly unimplemented and unverified.
+- **Simulation Notice**: All reel counts are clearly labeled `Sim Reel Cmds` (simulated command counts, not confirmed catch telemetry). All audio metrics are synthetic test patterns.
+- **Known Limitations**: Firmware behavior has been verified via clean PlatformIO compilation; no live physical hardware or Windows host validation is claimed.
 
 ## Requirements
 

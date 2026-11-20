@@ -16,3 +16,4 @@ extern TFT_eSprite temperature;
 extern TFT_eSprite temperatureExtremes;
 extern TFT_eSprite temperatureRange;
 extern TFT_eSprite rainChart;
+extern TFT_eSprite fishing_display;
