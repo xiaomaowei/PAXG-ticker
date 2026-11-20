@@ -8,9 +8,11 @@ Key conclusions:
 1. **USB HID (Keyboard Keystroke Output)**: **Implemented in Phase 3**. The stock Espressif Arduino component (`USBHIDKeyboard`) provides standard keyboard HID reports with standard USB descriptors (no custom VID/PID, hidden descriptors, evasion, or anticheat modifications). Initialized at boot alongside USB CDC via `keyboard.begin()` and `USB.begin()`.
 2. **Command Queue, Host-Mounted Gating & State Guards**: Implemented via a bounded nonblocking circular queue (`FISHING_KEY_QUEUE_CAPACITY = 8`). Press and release actions are strictly separated across independent service ticks (`FISHING_KEY_PRESS_HOLD_MS = 60ms`, `FISHING_KEY_RELEASE_GAP_MS = 60ms`). All keystroke transmission and arming are strictly gated behind actual host-mounted state (`_started && tinyusb_device_mounted`), Fishing mode, an active running state, and an explicit user armed flag (`fishingArmed`, toggled by holding both buttons).
 3. **Thread-Safe Disconnect & Auto-Disarm**: Asynchronous disconnect/suspend events from the USB event task set a synchronized `std::atomic<bool> s_pendingDisconnect` signal without mutating state directly across threads. The signal is consumed in `usb_hid_keyboard_tick` on the Arduino main loop, immediately clearing the queue, calling `Keyboard.releaseAll()`, and auto-disarming (`fishingArmed = false`), preventing automated key sends upon reconnect. Reconnect and resume events do not re-arm the device.
-4. **USB Audio Class (UAC 1.0 / 2.0 Feasibility Proof)**:
-   - **Production Firmware (Arduino ESP32 2.0.14 / ESP-IDF 4.4.6)**: **Unverified and Not Implemented**. An isolated compile/link proof of concept (`test/usb_audio_poc/**`) verified that while TinyUSB audio class headers compile cleanly, linking fails with `undefined reference to tud_audio_n_read`. Direct binary analysis confirms `libarduino_tinyusb.a` contains zero `tud_audio*` symbols and `audio_device.c` is omitted. No UAC code enters production builds.
-   - **Isolated ESP-IDF >= 5.0 Proof (`test/usb_audio_poc_idf/**`)**: **Feasibility Confirmed**. Using Espressif's official `esp_device_uac` (`espressif/usb_device_uac` v1.3.2) on ESP-IDF `v5.1.2`, an isolated PlatformIO project compiles and links cleanly (`firmware.elf`, exit code 0). The public API `uac_device_init` and non-codec PCM counting callback `uac_speaker_output_cb` successfully link against `tud_audio_n_read` and TinyUSB audio ISRs. This confirms that UAC is functionally supported on ESP32-S3 under ESP-IDF >= 5.0, while production firmware remains strictly untouched.
+4. **USB Audio Class (UAC 2.0 Feasibility Proof) & Simultaneous Composite UAC 2.0 + HID**:
+   - **Production Firmware (Arduino ESP32 2.0.14 / ESP-IDF 4.4.6)**: **Unverified and Not Implemented in Production**. In PlatformIO's stock `framework-arduinoespressif32` 2.0.14 distribution, `libarduino_tinyusb.a` omits audio symbols and `usbd.c` was compiled with `CFG_TUD_AUDIO = 0`. An isolated compile/link proof (`test/usb_audio_poc/**`) confirmed that while TinyUSB audio headers compile, linking fails with `undefined reference to tud_audio_n_read`. No UAC code enters production builds.
+   - **Isolated ESP-IDF >= 5.0 Proof (`test/usb_audio_poc_idf/**`)**: **Symbol Feasibility Confirmed**. Using Espressif's official `esp_device_uac` (`espressif/usb_device_uac` v1.3.2) on ESP-IDF `v5.1.2`, an isolated PlatformIO project compiles and links cleanly (`firmware.elf`, exit code 0). Linker symbols show code presence for `uac_device_init`, `tud_audio_n_read`, and `uac_speaker_output_cb`.
+   - **Isolated Simultaneous Composite UAC 2.0 + HID Keyboard Proof (`test/usb_composite_poc/**`)**: **Symbol & Descriptor Feasibility Confirmed**. Demonstrates the smallest viable isolated path to simultaneous UAC 2.0 speaker playback (48kHz 16-bit stereo PCM, Isochronous OUT + Sync Feedback IN) and USB HID Keyboard (Interrupt IN) in a single unified composite USB configuration descriptor under ESP-IDF `v5.1.2`. `firmware.elf` links both UAC 2.0 symbols (`tud_audio_n_read`, `tud_audio_rx_done_isr`, `uac_speaker_output_cb`) and HID keyboard symbols (`tud_hid_n_keyboard_report`, `hidd_open`, `usb_composite_hid_keyboard_press`, `usb_composite_hid_keyboard_release`), sharing descriptor `desc_configuration` (177 bytes). Keystrokes are strictly gated behind an explicit debounced physical button press on GPIO 0 (no automatic periodic keystrokes), and cross-task telemetry uses lock-free C11 `stdatomic.h`.
+   - **Evidence vs. Reality Qualification**: Successful compilation and resolved symbols demonstrate code presence and descriptor syntax only. They do not claim or prove Windows driver enumeration, simultaneous isochronous streaming with interrupt key injection, endpoint scheduling validity, physical audio playback, or in-game WoW bite recognition. Production firmware remains untouched.
 5. **Modular PCM Audio Detector**: **Implemented in Phase 5**. A platform-independent, replaceable audio detection engine (`IAudioDetector` / `PcmAudioDetector`) processes PCM16 mono frames with bounded ring buffering (`PcmRingBuffer`), Peak, Root Mean Square (RMS), adaptive ambient noise floor tracking (EMA), dynamic thresholding, debounce confirmation, and cooldown lockout gating. Deterministic synthetic test patterns verify normal burst detection, noise spike debounce rejection, and cooldown gating.
 6. **Synthetic PCM Loop, 9-State FSM & Multi-Page UI**: **Implemented in Phase 6**. The detector is connected to an in-engine bounded synthetic PCM source (128 samples per tick) generating baseline ambient noise (~250 RMS) with scheduled bursts (~6000 RMS). The state machine implements 9 explicit nonblocking states (`IDLE`, `CASTING`, `WAITING`, `BITE_DETECTED`, `REELING`, `COOLDOWN`, `TIMEOUT`, `PAUSED`, `ERROR`) timed via `millis()`. Three 320x170 UI pages (Dashboard, Audio Monitor, Settings) render into the `fishing_display` sprite without LCD flicker.
 7. **Persistent Settings & Conflict-Free Controls**: **Implemented in Phase 7**. Parameters (`absoluteThreshold`, `waitTimeoutMs`, `cooldownMs`, `castKey`, `interactKey`) persist in Arduino Preferences (NVS namespace `paxg_fishing`) with boundary clamping. Physical button controls provide mutually exclusive long/short press handling, safe exit, and dual-button arming.
@@ -332,6 +334,134 @@ To empirically test whether ESP32-S3 hardware supports native USB Audio Class un
 
 ---
 
+### 6.7 Phase 4.2 Smallest Viable Path: Simultaneous UAC 2.0 Speaker + HID Keyboard Composite PoC
+
+#### 6.7.1 Objective & Research Problem
+Moving toward real one-button fishing automation requires simultaneous USB operation:
+1. **Host PC Audio Ingestion**: Real-time USB Audio Class 2.0 (UAC 2.0 speaker OUT, `bcdADC = 0x0200`) receiving game sound from the host PC so that splash/bite audio can be recognized by the DSP detector without audio cables or analog microphones.
+2. **Device Keystroke Injection**: USB HID Keyboard sending cast and reel keystrokes (`HID_KEY_1`, `HID_KEY_SPACE`) back to the host PC.
+3. **One-Button Real Operation**: Eliminating simulated audio feeds and coordinating real audio input with physical button-triggered state transitions.
+
+#### 6.7.2 Technical Investigation: Custom Arduino TinyUSB vs. Arduino-as-IDF-Component
+Two architectural pathways were evaluated for achieving simultaneous UAC + HID while preserving existing TFT display (8-bit parallel ST7789) and Wi-Fi features:
+
+##### Pathway A: Custom TinyUSB Build under Current Arduino 2.0.14 (ESP-IDF 4.4.6)
+- **Status**: **Framework Packaging Boundary in Stock Arduino ESP32 2.0.14 Distribution**.
+- **Evidence-Backed Root Causes**:
+  1. **Precompiled Static Archive**: In PlatformIO Arduino ESP32 2.0.14 (`framework-arduinoespressif32 @ 3.20014.231204`), TinyUSB is precompiled into `tools/sdk/esp32s3/lib/libarduino_tinyusb.a`. `xtensa-esp32s3-elf-nm -g` confirms **zero** symbols matching `tud_audio*`.
+  2. **Compile-Time Dispatch Table Gating**: TinyUSB's device dispatcher (`usbd.c`) builds `_usbd_class_drivers[]` based on macro flags. Because `usbd.c.obj` was precompiled with `CFG_TUD_AUDIO = 0`, the internal class driver array has no slot or entry point for the audio driver. Compiling external audio source files in user application code cannot inject entries into `_usbd_class_drivers[]`.
+  3. **Rigid Arduino TinyUSB HAL**: The framework's `cores/esp32/esp32-hal-tinyusb.c` enforces a hardcoded enum (`USB_INTERFACE_MSC`, `DFU`, `HID`, `VENDOR`, `CDC`, `MIDI`, `CUSTOM`). It has no definition for Audio and assumes single-alternate interface structures, whereas UAC requires Alternate Setting 0 (zero bandwidth) and Alternate Setting 1 (active isochronous streaming).
+  4. **Driver Inexistence**: The official Espressif `usb_device_uac` driver requires ESP-IDF >= 5.0 and cannot compile against ESP-IDF 4.4.6 headers.
+- **Conclusion**: Building a custom TinyUSB stack inside the stock Arduino 2.0.14 tree is infeasible without replacing precompiled vendor SDK binaries, which violates pinned dependency integrity and reproducible builds.
+
+##### Pathway B: Compatible Arduino-as-IDF-Component Integration (ESP-IDF 5.1 / Arduino 3.x)
+- **Status**: **Architecturally Viable Long-Term Destination, with Concrete Migration Considerations for Production Firmware**.
+- **Investigation Details**:
+  1. **USB Subsystem**: Fully compatible. Under ESP-IDF 5.1.2, TinyUSB is compiled from source with full class driver selection (`CFG_TUD_AUDIO=1`, `CFG_TUD_HID=1`).
+  2. **TFT Display Driver Architectural Consideration**: In the PAXG production firmware, the LilyGo T-Display-S3 ST7789 display is driven by `TFT_eSPI` over an 8-bit parallel bus (`-DTFT_PARALLEL_8_BIT=1`, GPIOs 39-48 for data, GPIOs 5-9 for control). `TFT_eSPI_ESP32_S3.c` directly manipulates legacy ESP-IDF 4.4 I2S/LCD parallel register interfaces. Under ESP-IDF 5.x, Espressif refactored parallel display interfaces under the `esp_lcd` component (`esp_lcd_panel_io_i80`). Migrating production firmware would require adapting or replacing `TFT_eSPI` with an `esp_lcd`-compatible parallel driver. Note that this is an architectural interface migration task; no build failure has been established within this scope because the production firmware has not been compiled under ESP-IDF 5.x.
+  3. **Wi-Fi and RTOS Changes**: ESP-IDF 5.1 updates FreeRTOS to v10.5+ (header reorganizations) and introduces updated Wi-Fi event handler semantics.
+- **Conclusion**: ESP-IDF 5.1 is the authoritative target framework for UAC+HID composite support. To minimize risk, the smallest viable path is to validate the composite USB stack in an isolated ESP-IDF 5.1 harness first, establishing the exact integration contract before altering production display drivers.
+
+#### 6.7.3 Isolated Simultaneous Composite PoC (`test/usb_composite_poc/`)
+To conclusively verify that the ESP32-S3 toolchain and USB OTG descriptor architecture can register and link both UAC 2.0 speaker and HID keyboard in the same device, an isolated PlatformIO ESP-IDF project was implemented in [test/usb_composite_poc/](test/usb_composite_poc/):
+
+1. **Environment Configuration**:
+   - **PlatformIO Core**: `6.1.19`
+   - **Platform**: `espressif32 @ 6.5.0`
+   - **Framework**: `framework-espidf @ 3.50102.240122` (ESP-IDF `v5.1.2`)
+   - **Toolchain**: `toolchain-xtensa-esp32s3 @ 12.2.0+20230208` (GCC 12.2.0)
+   - **TinyUSB Component**: `espressif/tinyusb` (v0.19.0~3) compiled from source with `audio_device.c` and `hid_device.c`
+   - **Composite Driver**: Custom unified component [test/usb_composite_poc/components/usb_device_composite/](test/usb_composite_poc/components/usb_device_composite/)
+
+2. **Unified Composite USB Descriptor Architecture & Bytecode Inspection**:
+   The composite device descriptor binds both interfaces under an Interface Association Descriptor (IAD) architecture. Inspection of `desc_configuration` (177 bytes total) extracted directly from the compiled ELF confirms:
+   - **Device Descriptor**: `bDeviceClass = TUSB_CLASS_MISC (0xEF)`, `bDeviceSubClass = 0x02`, `bDeviceProtocol = 0x01 (IAD)`, VID `0x303A`, PID `0x8002`.
+   - **Audio IAD**: Length 8, `bFirstInterface = 0`, `bInterfaceCount = 2`, `bFunctionClass = 0x01` (Audio), `bFunctionProtocol = 0x20` (IP Version 02.00).
+   - **Interface 0 (Audio Control)**: Standard AC Interface + CS AC Header (`bcdADC = 0x0200`) + Clock Source (`UAC2_ENTITY_CLOCK`) + SPK Input Terminal + SPK Feature Unit + SPK Output Terminal.
+   - **Interface 1 (Audio Streaming)**: Standard AS Interface (Alt 0 = 0 bandwidth; Alt 1 = active streaming) + Type I PCM Format Descriptor (48kHz, 16-bit Stereo PCM) + Isochronous Data OUT Endpoint (`0x01`, `maxPacketSize = 196 bytes`, interval 1ms) + Isochronous Sync Feedback IN Endpoint (`0x81`, `maxPacketSize = 4 bytes`, interval 1ms).
+   - **Interface 2 (HID Keyboard)**: Standard HID Interface (`bInterfaceClass = 0x03`, `bInterfaceSubClass = 0x01` Boot, `bInterfaceProtocol = 0x01` Keyboard) + HID Descriptor + Interrupt IN Endpoint (`0x82`, `maxPacketSize = 16 bytes`, 10ms polling interval) + Boot Keyboard Report Descriptor (`desc_hid_report`, standard 8-byte input report).
+
+3. **ESP32-S3 Endpoint Budget Verification**:
+   - `OUT` Endpoints: `EP 0 OUT` (Control, 64B), `EP 1 OUT` (Audio Streaming, 196B) -> 2 of 5 used.
+   - `IN` Endpoints: `EP 0 IN` (Control, 64B), `EP 1 IN` (Audio Feedback, 4B), `EP 2 IN` (HID Keyboard, 16B) -> 3 of 5 used.
+   - **Verdict**: Hardware limits (5 IN / 5 OUT endpoints, 1024-byte FIFO) are completely respected with ample margin.
+
+4. **Public C API**:
+   ```c
+   // Composite device initialization (UAC 2.0 speaker + HID keyboard)
+   esp_err_t usb_composite_init(usb_composite_config_t *config);
+   esp_err_t uac_device_init(usb_composite_config_t *config);
+
+   // Keystroke injection
+   bool usb_composite_hid_ready(void);
+   esp_err_t usb_composite_hid_keyboard_press(uint8_t modifier, uint8_t keycode);
+   esp_err_t usb_composite_hid_keyboard_release(void);
+   ```
+
+5. **Empirical Compilation and Linkage Evidence**:
+   ```powershell
+   pio run -d test/usb_composite_poc
+   ```
+   - **Exit Code**: `0`
+   - **RAM Usage**: `16,040 bytes` (~4.9% of 320 KB)
+   - **Flash Usage**: `234,768 bytes` (~22.4% of 1 MB app partition)
+   - **Binary Artifacts**: `test/usb_composite_poc/.pio/build/esp32s3_composite_poc/firmware.elf` and `firmware.bin`
+
+6. **Resolved Linker Symbols via `xtensa-esp32s3-elf-nm`**:
+   Inspection confirms that all critical UAC audio, HID keyboard, and connection status symbols are fully resolved in the same ELF binary:
+   - `3c028d04 D desc_configuration` (Shared Composite Configuration Descriptor)
+   - `3c028db8 d desc_hid_report` (HID Keyboard Report Descriptor)
+   - `42013520 T hidd_open` (TinyUSB HID Class Driver Open Handler)
+   - `4201446c T tud_audio_n_read` (TinyUSB UAC Isochronous Data Read API)
+   - `42001c4c T tud_audio_rx_done_isr` (TinyUSB UAC Audio RX Done ISR Handler)
+   - `42017664 T tud_hid_descriptor_report_cb` (TinyUSB HID Report Descriptor Callback)
+   - `420134c0 T tud_hid_n_keyboard_report` (TinyUSB HID Keyboard Report Transmission)
+   - `4201cd68 t uac_speaker_output_cb` (No-Codec PCM Frame Reception Callback)
+   - `42001d10 T usb_composite_hid_keyboard_press` (Composite HID Keyboard Keypress API)
+   - `42001d68 T usb_composite_hid_keyboard_release` (Composite HID Keyboard Release API)
+   - `42001cf0 T usb_composite_is_mounted` (Composite Device Mount Status API)
+   - `42001db0 T usb_composite_init` (Composite Device Initialization API)
+   - `42001f3c T uac_device_init` (Compatible UAC Device Initialization API)
+
+7. **Safety, Concurrency & Input Control Design (`main.c` & `btn_fsm.h`)**:
+   - **Connection State vs. Transient Endpoint Readiness**: `usb_composite_is_mounted()` queries `tud_mounted() && !tud_suspended()` to evaluate actual host bus enumeration and active configuration. `tud_hid_ready()` reflects temporary endpoint buffer readiness. Gating bus disconnection exclusively on `!usb_composite_is_mounted()` ensures that temporary endpoint busy states (e.g. Immediately following a press report while in flight) **never trigger false disconnect aborts**, preventing held keys from being dropped or stuck.
+   - **Observed Stable Release on Startup & Mount**: The FSM initializes strictly in `BTN_STATE_STARTUP_WAIT_RELEASE`. If `GPIO 0` is held low across boot or USB mount, zero keystrokes are emitted. A stable release of >= 50ms is mandatory before arming to `BTN_STATE_IDLE`.
+   - **Deterministic Single-Shot Actuation (No Auto-Repeat)**: Physical press is debounced for >= 50ms, held non-blocking for 50ms (`KEY_PRESS_HOLD_MS`, no task delays), and transitions to `BTN_STATE_WAIT_RELEASE`. Holding the button indefinitely emits strictly zero repeated keys.
+   - **Release Report Verification & Non-Blocking Retry**: Return status of `usb_composite_hid_keyboard_release()` is checked: if busy (`ESP_ERR_NOT_FINISHED` / `BTN_OP_BUSY`), it retries non-blocking on subsequent ticks (`BTN_STATE_RETRY_RELEASE`). A successful key sequence is claimed **only when the release report is accepted**.
+   - **Safe Abort on Real USB Disconnect/Suspend**: Genuine unmount or suspend during key hold or retry safely resets the FSM to `BTN_STATE_STARTUP_WAIT_RELEASE` without stuck keys or phantom transmissions, requiring a full observed release before re-arming on reconnect.
+   - **Task Safety & Cross-Task Synchronization**: TinyUSB runs under FreeRTOS (`CFG_TUSB_OS = OPT_OS_FREERTOS`). Keystroke injection is called exclusively from `composite_monitor_task`. Metrics counters use C11 `stdatomic.h` primitives (`atomic_uint_fast32_t`), eliminating data races between the audio reception ISR/task and background monitor task.
+   - **Evidence Boundaries & Deterministic Testing**:
+     - *Host Python Tests (`test_button_fsm.py`)*: **HOST-EXECUTION VERIFIED** under Python 3.14 across 6 scenarios (busy right after press, release retry, true disconnect/reconnect, held at boot/mount, bounce, single actuation).
+     - *Standalone C Test (`test_button_fsm.c`)*: Native host compiler probe (`vswhere`/MSVC `cl.exe`, `clang`, `gcc`) confirmed no native host C compiler on PATH. The test is strictly marked **COMPILE-ONLY VERIFIED** via `xtensa-esp32s3-elf-gcc` (`-Wall -Wextra -Werror`); host execution is not claimed for the C binary.
+
+8. **Automated Verification Harness (`run_validation.py`)**:
+   Execution of [test/usb_composite_poc/run_validation.py](test/usb_composite_poc/run_validation.py):
+   ```powershell
+   python test/usb_composite_poc/run_validation.py
+   ```
+   - Step 0: Probes native host C compiler; labels standalone C test as COMPILE-ONLY and cross-compiles cleanly with zero warnings.
+   - Step 0b: Confirms all 6 host-runnable Button FSM deterministic unit tests pass under Python 3.14.
+   - Step 1: Confirms isolated composite build succeeds (`returncode == 0`).
+   - Step 2: Confirms binary artifacts (`firmware.elf`, `firmware.bin`) exist.
+   - Step 3: Inspects and asserts all 13 critical UAC, HID, and connection status symbols exist in the binary.
+   - Step 4: Extracts `desc_configuration` via `objdump` and verifies AC, AS, Format Type I, Isochronous OUT EP (196B), Feedback IN EP (4B), HID Interface, and Interrupt IN EP (16B).
+   - Step 5: Confirms production firmware build remains clean (`pio run`, `returncode == 0`).
+   - Step 6: Automatically cleans up temporary isolated build artifacts (`.pio`, `sdkconfig.*`).
+
+9. **Roadmap to One-Button Real Fishing**:
+   - **Phase A (Complete)**: Prove simultaneous UAC 2.0 speaker + HID keyboard compilation, descriptor bytecode cohabitation, and atomic ISR safety in an isolated image (`test/usb_composite_poc/`).
+   - **Phase B (Display Driver Adaptation)**: Evaluate migrating ST7789 parallel 8-bit bus logic to ESP-IDF 5.x `esp_lcd_panel_io_i80` (or isolated driver component).
+   - **Phase C (Detector Ingestion)**: Wire `uac_speaker_output_cb` PCM frames directly into `PcmAudioDetector::processFrame(...)` in place of synthetic samples.
+   - **Phase D (Host Driver & In-Game Verification)**: Flash composite firmware to hardware, connect native USB OTG to Windows 11 host PC, verify audio endpoint plays game sound and HID keyboard injects fishing keys upon bite detection under the 4-gate safety interlock.
+
+10. **Scope Boundaries & Clear Disclaimers**:
+    - **Code Presence Only**: Successful compilation, linking, and descriptor inspection demonstrate **code presence only**. They do **NOT** prove Windows enumeration, simultaneous streaming, endpoint validity under Full-Speed (12Mbps) scheduling, real sample reception, hardware timing, or TFT/hardware compatibility.
+    - **Physical Hardware Execution**: **UNVERIFIED**. The composite binary was compiled for symbol and descriptor verification and was **NOT flashed** to the physical board.
+    - **Windows 11 Composite Driver Binding**: **UNVERIFIED**. Simultaneous enumeration and binding of Windows Audio Device (`usbaudio2.sys`) and HID Keyboard from this composite descriptor has not been tested on a physical Windows host.
+    - **Production Isolation**: Production firmware remains strictly on Arduino ESP32 2.0.14 without UAC code.
+
+---
+
 ## 7. Phase 5 Modular PCM Audio Detector & Synthetic Verification
 
 ### 7.1 Architecture & Modular Interface
@@ -493,5 +623,11 @@ Settings are saved under NVS namespace `paxg_fishing`:
 | **Isolated ESP-IDF UAC Proof** | 4.1 | **VERIFIED** | `test/usb_audio_poc_idf`: ESP-IDF 5.1.2 + `esp_device_uac` links with `tud_audio*` symbols resolved (exit code 0). |
 | **Isolated UAC Hardware Flash**| 4.1 | **NOT FLASHED** | PoC binary was built to prove driver/symbol feasibility, but deliberately NOT flashed to board. |
 | **Production UAC Isolation**   | 4-7 | **VERIFIED** | UAC code is restricted to `test/usb_audio_poc/` and `test/usb_audio_poc_idf/`; never enters production firmware. |
-| **UAC HW / Windows Enum / Audio** | 4.1 | **UNVERIFIED** | Physical UAC USB audio capture and Windows audio device enumeration unverified. |
+| **Isolated UAC HW / Windows Enum / Audio** | 4.1 | **UNVERIFIED** | Physical UAC USB audio capture and Windows audio device enumeration unverified. |
+| **Isolated Composite UAC 2.0+HID Build** | 4.2 | **VERIFIED CODE PRESENCE** | `test/usb_composite_poc`: ESP-IDF 5.1.2 + TinyUSB source compiles and links firmware.elf & firmware.bin (exit code 0). |
+| **Composite Descriptor & Symbol Linkage** | 4.2 | **VERIFIED CODE PRESENCE** | nm and objdump confirm 177B UAC 2.0 + HID descriptor bytecode (48kHz 16-bit stereo PCM, EP1 OUT 196B, EP1 IN 4B, EP2 IN 16B) and 13 symbols. |
+| **Button FSM Host Behavioral Tests** | 4.2 | **HOST-VERIFIED (PYTHON)** | Python 3.14 tests pass 6 deterministic cases (busy right after press, release retry, true disconnect, held at boot/mount, bounce, single actuation). |
+| **Button FSM Standalone C Tests** | 4.2 | **COMPILE-ONLY VERIFIED** | `test_button_fsm.c` compiles cleanly under `xtensa-esp32s3-elf-gcc` (-Wall -Wextra -Werror); no native host compiler exists on host PATH, so host pass is not claimed for C binary. |
+| **Isolated Composite Hardware Flash**| 4.2 | **NOT FLASHED** | Composite PoC binary built for symbol/descriptor proof; deliberately NOT flashed to physical board. |
+| **Composite Windows 11 Audio+HID Host Binding** | 4.2 | **UNVERIFIED** | Simultaneous enumeration of Windows Audio Speaker and HID Keyboard unverified on physical Windows host; symbol/descriptor presence does not prove runtime driver binding. |
 | **In-Game Bite Recognition**   | 5-7 | **UNVERIFIED** | Placeholder threshold algorithm; no claim of real WoW splash recognition. |
