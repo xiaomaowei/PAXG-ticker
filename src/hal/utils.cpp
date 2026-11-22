@@ -31,6 +31,7 @@ constexpr int GRID_TEXT_OFFSET_Y = 9;
 constexpr int INPUT_TEXT_X = 5;
 constexpr int INPUT_TEXT_Y = 5;
 constexpr int INPUT_CLEAR_HEIGHT = 40;
+constexpr int STATUS_INSTRUCTION_Y = 24;
 
 constexpr int KEYBOARD_START_COL = 0;
 constexpr int KEYBOARD_START_ROW = 1;
@@ -150,30 +151,38 @@ void display_keyboard()
     tft.fillTriangle(265, 154, 272, 150, 272, 158, TFT_WHITE);
     tft.fillRect(301, 155, 7, 8, TFT_WHITE);
     tft.fillTriangle(296, 155, 304, 147, 312, 155, TFT_WHITE);
+
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_SILVER, TFT_BLACK);
+    tft.setCursor(INPUT_TEXT_X, STATUS_INSTRUCTION_Y);
+    tft.print("Hold DOWN (1s) to Submit");
 }
 
-String keyboard_input()
+bool keyboard_input(String& out_password)
 {
     display_keyboard();
     int selected_col = KEYBOARD_START_COL;
     int selected_row = KEYBOARD_START_ROW;
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setCursor(INPUT_TEXT_X, INPUT_TEXT_Y);
     draw_keyboard_selector(selected_col, selected_row, TFT_BLUE);
     bool upper_letter = false;
     String password = "";
     unsigned long pressStartTime = 0;
-    const unsigned long startMillis = millis();
+    unsigned long lastActivityMillis = millis();
     bool buttonPressed = false;
 
     while (true)
     {
-        if (millis() - startMillis >= KEYBOARD_INPUT_TIMEOUT_MS)
+        if (millis() - lastActivityMillis >= KEYBOARD_INPUT_TIMEOUT_MS)
         {
-            return password;
+            return false;
         }
 
         if (digitalRead(BUTTON_UP) == LOW)
         {
+            lastActivityMillis = millis();
             draw_keyboard_selector(selected_col, selected_row, TFT_WHITE);
             ++selected_col;
             if (selected_col >= GRID_COLS)
@@ -191,6 +200,7 @@ String keyboard_input()
 
         if (digitalRead(BUTTON_DOWN) == LOW)
         {
+            lastActivityMillis = millis();
             if (!buttonPressed)
             {
                 pressStartTime = millis();
@@ -201,6 +211,7 @@ String keyboard_input()
         {
             if (buttonPressed)
             {
+                lastActivityMillis = millis();
                 unsigned long pressDuration = millis() - pressStartTime;
                 buttonPressed = false;
 
@@ -209,6 +220,8 @@ String keyboard_input()
                     const int key_index = selected_col + (selected_row * GRID_COLS);
                     if (key_index < static_cast<int>(KEYS.size()))
                     {
+                        tft.setTextSize(2);
+                        tft.setTextColor(TFT_WHITE, TFT_BLACK);
                         if (upper_letter)
                         {
                             String key = KEYS[key_index];
@@ -234,13 +247,20 @@ String keyboard_input()
                         {
                             password = password.substring(0, password.length() - 1);
                         }
+                        tft.setTextSize(1);
+                        tft.setTextColor(TFT_SILVER, TFT_BLACK);
+                        tft.setCursor(INPUT_TEXT_X, STATUS_INSTRUCTION_Y);
+                        tft.print("Hold DOWN (1s) to Submit");
+                        tft.setTextSize(2);
+                        tft.setTextColor(TFT_WHITE, TFT_BLACK);
                         tft.setCursor(INPUT_TEXT_X, INPUT_TEXT_Y);
                         tft.print(password);
                     }
                 }
                 else
                 {
-                    return password;
+                    out_password = password;
+                    return true;
                 }
             }
             delay(KEYBOARD_NAV_DELAY_MS);

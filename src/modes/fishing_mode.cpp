@@ -963,8 +963,22 @@ static void render_page_settings()
     std::snprintf(valBuf[0], sizeof(valBuf[0]), "%ld  (500-5000)", static_cast<long>(s_settings.absoluteThreshold));
     std::snprintf(valBuf[1], sizeof(valBuf[1]), "%lds  (5-30s)", static_cast<long>(s_settings.waitTimeoutMs / 1000UL));
     std::snprintf(valBuf[2], sizeof(valBuf[2]), "%.1fs  (0.5-5.0s)", s_settings.cooldownMs / 1000.0f);
-    std::snprintf(valBuf[3], sizeof(valBuf[3]), "'%c'  (0x%02X)", s_settings.castKey, s_settings.castKey);
-    std::snprintf(valBuf[4], sizeof(valBuf[4]), "'%c'  (0x%02X)", s_settings.interactKey, s_settings.interactKey);
+    if (s_settings.castKey == ' ')
+    {
+        std::snprintf(valBuf[3], sizeof(valBuf[3]), "SPACE  (0x%02X)", s_settings.castKey);
+    }
+    else
+    {
+        std::snprintf(valBuf[3], sizeof(valBuf[3]), "'%c'  (0x%02X)", s_settings.castKey, s_settings.castKey);
+    }
+    if (s_settings.interactKey == ' ')
+    {
+        std::snprintf(valBuf[4], sizeof(valBuf[4]), "SPACE  (0x%02X)", s_settings.interactKey);
+    }
+    else
+    {
+        std::snprintf(valBuf[4], sizeof(valBuf[4]), "'%c'  (0x%02X)", s_settings.interactKey, s_settings.interactKey);
+    }
     std::snprintf(valBuf[5], sizeof(valBuf[5]), "");
 
     for (int r = 0; r < SETTINGS_ROW_COUNT; ++r)

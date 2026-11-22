@@ -16,10 +16,15 @@ set(compile_options
     "-DCFG_TUSB_MCU=${tusb_mcu}"
     )
 
+# If optional networking implementation files are missing from the vendor tree,
+# inject a compile-time guard header ensuring CFG_TUD_ECM_RNDIS=1 or CFG_TUD_NCM=1 fails explicitly
+if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/lib/networking/rndis_reports.c")
+    list(APPEND compile_options "-include" "${CMAKE_CURRENT_LIST_DIR}/src/tusb_net_guard.h")
+endif()
+
 set(includes_private
     "src/"
     "src/device"
-    "lib/networking" # For RNDIS definitions
     )
 
 set(includes_public
@@ -36,10 +41,6 @@ set(srcs
     "src/class/video/video_device.c"
     "src/class/bth/bth_device.c"
     "src/class/usbtmc/usbtmc_device.c"
-    # NET class
-    "src/class/net/ecm_rndis_device.c"
-    "lib/networking/rndis_reports.c"
-    "src/class/net/ncm_device.c"
     # DFU
     "src/class/dfu/dfu_device.c"
     "src/class/dfu/dfu_rt_device.c"
@@ -52,9 +53,35 @@ set(srcs
     "src/tusb.c"
     )
 
-set(requirements_private
-    esp_netif   # required by rndis_reports.c: #include "netif/ethernet.h"
+set(requirements_private)
+
+# Optional networking class support (ECM / RNDIS / NCM)
+# In isolated audio/HID configurations, CFG_TUD_ECM_RNDIS and CFG_TUD_NCM are disabled (0)
+# and the vendor tree does not ship lib/networking (rndis_reports.c).
+# If networking support is enabled via Kconfig or CMake, ensure required sources exist or fail explicitly.
+if(CONFIG_TINYUSB_NET_MODE OR CONFIG_USB_DEVICE_NET OR TINYUSB_NET_ENABLED)
+    set(net_rndis_src "${CMAKE_CURRENT_LIST_DIR}/lib/networking/rndis_reports.c")
+    if(NOT EXISTS "${net_rndis_src}")
+        message(FATAL_ERROR "TinyUSB network driver enabled (CONFIG_TINYUSB_NET_MODE / CONFIG_USB_DEVICE_NET / TINYUSB_NET_ENABLED), but required networking source '${net_rndis_src}' is missing from the vendor tree.")
+    endif()
+
+    list(APPEND includes_private "lib/networking")
+    list(APPEND srcs
+        "src/class/net/ecm_rndis_device.c"
+        "lib/networking/rndis_reports.c"
+        "src/class/net/ncm_device.c"
     )
+    list(APPEND requirements_private esp_netif)
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/lib/networking/rndis_reports.c")
+    # If the vendor tree provides lib/networking, include it conditionally for builds with networking support
+    list(APPEND includes_private "lib/networking")
+    list(APPEND srcs
+        "src/class/net/ecm_rndis_device.c"
+        "lib/networking/rndis_reports.c"
+        "src/class/net/ncm_device.c"
+    )
+    list(APPEND requirements_private esp_netif)
+endif()
 
 if(${target} STREQUAL "esp32p4")
     list(APPEND requirements_private

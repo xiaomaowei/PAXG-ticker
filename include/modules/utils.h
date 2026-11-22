@@ -5,4 +5,4 @@
 #include <vector>
 
 unsigned row_choice(const std::vector<String>&);
-String keyboard_input();
+bool keyboard_input(String& out_password);

@@ -1,5 +1,14 @@
 idf_component_register(
-    SRCS "main.cpp"
-    INCLUDE_DIRS "."
-    REQUIRES arduino TFT_eSPI usb_device_composite tinyusb
+    SRCS
+        "main.cpp"
+        "uac_audio_bridge.cpp"
+        "live_fishing_controller.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../src/audio/pcm_audio_detector.cpp"
+    INCLUDE_DIRS
+        "."
+        "${CMAKE_CURRENT_LIST_DIR}/../../../include"
+    REQUIRES
+        arduino
+        TFT_eSPI
+        usb_device_composite
 )

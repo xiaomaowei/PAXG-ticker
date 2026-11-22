@@ -4,7 +4,7 @@ if(${IDF_VERSION_MAJOR} LESS 6)
     list(APPEND priv_requires usb)       # USB PHY is part of usb component in IDF < 6.0
 endif()
 
-idf_component_register(SRCS usb_device_composite.c tusb/usb_descriptors.c
+idf_component_register(SRCS usb_device_composite.c usb_audio_queue.c tusb/usb_descriptors.c
                     INCLUDE_DIRS "include" "tusb" "tusb_uac"
                     PRIV_REQUIRES ${priv_requires})
 

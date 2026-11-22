@@ -117,7 +117,9 @@ The 4th display mode, **WoW Fishing**, provides a complete nonblocking finite st
     - **Page 1 (Audio Monitor)**: Full-width live RMS scope sparkline with horizontal threshold marker, numerical Peak/RMS/Noise readouts, dynamic threshold calculation, debounce/cooldown status, and ring buffer diagnostics.
     - **Page 2 (Settings)**: Interactive menu to select and adjust persistent parameters.
 - **Phase 7 (Persistent Settings, Conflict-Free Controls & Final Local Acceptance)**:
-  - **Arduino Preferences (NVS) Persistence**: Automatically stores and restores `absoluteThreshold` (500–5000, step 250), `waitTimeoutMs` (5000–30000ms, step 1000ms), `cooldownMs` (500–5000ms, step 500ms), `castKey` (whitelist), and `interactKey` (whitelist) in namespace `paxg_fishing`. Clamps all values on load and save. Default startup is safely disarmed (`fishingArmed = false`). No secrets stored.
+  - **Arduino Preferences (NVS) Persistence**: Automatically stores and restores `absoluteThreshold` (500–5000, step 250), `waitTimeoutMs` (5000–30000ms, step 1000ms), `cooldownMs` (500–5000ms, step 500ms), `castKey` (whitelist: `'1'`, `'2'`, `'3'`, `'4'`, `'5'`, `'9'`, `'0'`, and space `0x20`), and `interactKey` (whitelist) in namespace `paxg_fishing`. Clamps all values on load and save. Default startup is safely disarmed (`fishingArmed = false`). No secrets stored.
+    - **Key Selection & Display**: In Settings (Page 3), users can select `SPACE` independently for Cast Key (row 4) and Interact Key (row 5) by pressing short DOWN on the respective row to cycle through allowed keys. When ASCII space (`0x20`) is selected, the UI explicitly renders `SPACE (0x20)` instead of a blank character. Users utilizing one-key spacebar fishing addons can set both Cast and Interact keys to `SPACE`.
+    - **Simulation and Safety Guarding**: Operation remains strictly synthetic and disarmed by default (`fishingArmed = false`). Keystroke output requires explicit user arming via dual-button hold, an active host-mounted USB connection, and an active running state. The audio detector operates against synthetic test streams and does not perform real in-game fishing recognition or bobber splash detection.
   - **Conflict-Free Button Handling**:
     - **PAXG / Clock / Weather Modes**: Button UP (GPIO 14) and Button DOWN (GPIO 0) releases strictly navigate modes forward and backward, regardless of whether pressed short or held long.
     - **Fishing Mode**:
@@ -155,6 +157,13 @@ The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):
 - **Auto-Disarm on Exit & Disconnect**: Leaving Fishing mode, exiting to PAXG, or unplugging/suspending USB immediately sets `fishingArmed = false`, flushes pending queued keys, and calls `Keyboard.releaseAll()`.
 - **Reset Telemetry vs Stop**: In Fishing mode, the first long press on DOWN stops the active run (transitions to `IDLE`) and disarms. A second long press while already in `IDLE` resets session counters (`simReelCmds = 0`, `simTimeouts = 0`, `uptime = 0`, `liveKeySentCount = 0`).
 - **Setup Isolation**: Wi-Fi selection and keyboard input routines in `src/hal/utils.cpp` execute inside `app_setup()` prior to `app_loop()` and do not interact with runtime mode switching.
+  - **Wi-Fi Setup Controls**:
+    - **Row Selection (Network / Boot Mode)**: Short press UP advances selection row; Short press DOWN confirms selection.
+    - **Virtual Keyboard (Password Input)**:
+      - **Short Press UP**: Advances cursor position through the 4x10 grid.
+      - **Short Press DOWN (< 1000ms)**: Types selected character, toggles SHIFT, or deletes previous character on BACKSPACE.
+      - **Long Press DOWN (Hold >= 1000ms)**: Submits the entered password and initiates connection (prompted on-screen by `Hold DOWN (1s) to Submit`).
+      - **Timeout Safety**: If inactive for 180 seconds, input aborts without submitting partial credentials and returns to network selection without initiating a connection.
 
 ### USB Feasibility Status & Disclaimers
 
@@ -162,13 +171,39 @@ The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):
   - Successful compilation and clean firmware linking with PlatformIO for target `lilygo-t-display-s3` (ESP32-S3), verifying stock `USBHIDKeyboard` integration, thread-safe disconnect consumption, bounded command queue state transitions, separate service tick press/release pairing, 9-state nonblocking FSM, 3 UI pages, and strict gating logic.
   - Phase 4 isolated UAC feasibility proof: asserted compilation success and asserted link failure specifically on missing `tud_audio` symbols due to absence of `audio_device.c` and symbols in `libarduino_tinyusb.a`.
   - Phases 5–7 modular PCM audio detector, synthetic stream loop, FSM transitions, and persistent settings clamping: verified via cross-compilation with strict flags (`-Wall -Wextra -Werror`).
+  - Isolated Arduino + ESP-IDF 5.x PoC (`test/arduino_idf_integration_poc`): verified static build, 15/15 required symbols, 20/20 native unit tests passing, and byte-identical partition table matching production.
+
+### Bounded Physical Hardware Acceptance Evidence (2026-11-20 Testing Session)
+
+On 2026-11-20, bounded physical hardware acceptance testing was performed on a local ESP32-S3 (COM3) using the isolated PoC (`test/arduino_idf_integration_poc`):
+
+- **Passive UAC Audio Ingestion (User-Observed Evidence)**:
+  - ESP32-S3 on COM3 was temporarily flashed with the isolated PoC image.
+  - Windows enumerated the USB composite device with VID `0x303A` PID `0x8002` and recognized the `usb uac` speaker endpoint.
+  - The user routed World of Warcraft game audio directly to the `usb uac` speaker.
+  - On-screen telemetry confirmed: USB connection reported mounted/active, packet counter steadily incremented, RMS audio energy fluctuated dynamically with game sound, and the Trigs counter incremented upon a single manually observed fish bite.
+  - *Scope & Limitations*: This represents a single qualitative user observation during live manual play, not a statistically measured or calibrated true-positive (TP) or false-positive (FP) rate. No numeric packet logs or screenshots were captured during this session.
+- **Authorized Isolated Controller Keystroke Test (User-Observed, Notepad Only)**:
+  - The user explicitly authorized testing the controller HID key injection in a desktop text editor (Windows Notepad only) using separate audio input, and reported Notepad was focused during the test.
+  - After arming and starting while audio was flowing, the user observed an initial space character (` ` / HID usage `0x2c`) typed into Notepad (corresponding to the start-of-run cast keypress; this does not constitute evidence of an audio-triggered reel keypress).
+  - Pressing physical button DOWN immediately halted operation and returned the controller state to `DISARMED`.
+  - *No In-Game Automatic Keystroke Test in That Run*: In that specific test run, keystrokes were directed to Windows Notepad only.
+- **User-Supervised In-Game Observation & Later-Bite Timeout (User Report)**:
+  - The user explicitly authorized a single-cycle supervised in-game test and reported observing one successful cast and reel cycle (one space cast, one space reel, followed by automatic disarm to DISARMED).
+  - In subsequent tests involving later bites, the user observed the device stopping red in DISARMED ~20 seconds after casting.
+  - *Timing Diagnosis & 30-Second Cast Window*: In source code, `WAIT_TIMEOUT_MS` was originally 20,000ms (20s) measured from entering `Waiting` (after 1,500ms `Casting`). The user reports a standard World of Warcraft cast lasts 30 seconds, and bites can happen at any time within it. This supports timeout as a plausible cause for the ~20s stop, though it does not eliminate the possibility of transient audio or USB interruptions.
+  - *Updated Deadline & Display*: The waiting deadline was increased to 32,000ms (`WAIT_TIMEOUT_MS = 32000UL`, providing 33.5s total from cast start) to fully cover the 30-second window plus margin. The 320x170 LCD now displays an unambiguous countdown `(32s)` down to `( 1s)` during `Waiting` and explicitly renders the last stop reason (e.g. `ARM: [DISARMED - BITE_TIMEOUT]` vs `AUDIO_DROPOUT` or `USB_UNMOUNTED`) when stopped, without falsely showing positive time when stopped `( 0s)`.
+  - *Limitations*: These observations are based solely on qualitative user reports without audio recordings, numeric packet dumps, or precision benchmarks. In-game automation success rates, acoustic true-positive rates, and false-positive rates under real game sounds/music remain unmeasured, and the audio threshold remains uncalibrated.
+- **Production Firmware Restoration & Current Status**:
+  - Following testing, the original production `app0` partition binary image was reflashed and verified by SHA-256 hash.
+  - The user confirmed that the Home price screen, Wi-Fi connectivity, and standard game audio playback were completely restored.
+  - *Current Production State*: The restored production firmware binary still operates with synthetic audio test loops; production firmware does NOT currently integrate UAC audio or the production detector pipeline. The source code UI label update for `SPACE` is in source code only, not in the currently running restored production binary.
+
 - **What Remains Unverified**:
-  - Physical execution on hardware: Local ESP32-S3 physical device validation was unavailable.
-  - Windows 11 host USB composite driver enumeration and keystroke delivery across Windows USB hubs.
-  - Game interaction: Keys `'1'` and `'2'` are safe placeholder constants and do not claim verified gameplay automation.
-  - Production USB Audio (UAC): Unimplemented in production firmware; requires framework migration or IDF static library rebuilds to resolve missing symbols.
-  - In-game acoustic recognition: Detector is a general energy threshold block and makes no claim of accurate WoW fishing splash sound recognition.
-- **Simulation Notice**: Reel counts are labeled `SIM REEL CMDS` (simulated command counts, not confirmed catch telemetry). All audio metrics are synthetic test patterns.
+  - In-game automated keystrokes & reliability: Beyond the single supervised single-cycle observation reported by the user, continuous multi-cycle automation with both bite-triggered reel and safe 30s-cast-expiry timeout auto-recast is implemented in the isolated PoC with a 2.0s non-blocking cooldown, but remains unverified on live physical hardware.
+  - Acoustic recognition calibration: The detector uses an uncalibrated energy threshold and does not claim verified discrimination between bobber splashes and background game sounds/music (false-alarm and true-positive rates remain unmeasured).
+  - Production UAC integration: UAC 2.0 audio input and production detector pipeline integration remain in the isolated PoC and have not been merged into the production firmware build.
+- **Simulation Notice**: In restored production firmware, reel counts remain labeled `SIM REEL CMDS` (simulated command counts, not confirmed catch telemetry). All production audio metrics are synthetic test patterns.
 
 ## Requirements
 
@@ -256,3 +291,14 @@ Issues and pull requests are welcome.
 ## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE).
+
+## Wi-Fi Connection Failure Diagnostics
+
+When a Wi-Fi connection attempt fails in either **Home** or **Standard** startup mode, a dedicated diagnostic screen is presented on the 320x170 LCD for 6 seconds and logged to Serial:
+
+- **Mode**: Indicates whether Home (fast connect) or Standard (manual entry) failed.
+- **WiFi.status**: Numeric status code and enum name (e.g., `6 (WL_DISCONNECTED)`).
+- **ESP reason**: Actual numeric ESP32 disconnect reason code and constant name (e.g., `202 (AUTH_FAIL)`). Missing reasons are reported as `unknown (none recorded)`.
+- **Events**: Cross-task event telemetry including connection count, disconnection count, got-IP flag, and disconnection RSSI when available.
+- **Stage & Diagnosis**: Distinguishes AP association, auth/handshake failure, or connected-to-AP waiting for DHCP IP assignment based on actual event evidence.
+- **Action**: Indicates subsequent flow (fallback to manual setup for Home; return to network selection for Standard).
