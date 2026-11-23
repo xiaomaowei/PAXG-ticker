@@ -1,5 +1,7 @@
 # PAXG-ticker
 
+**Documentation:** [English](README.md) · [繁體中文](README.zh-TW.md)
+
 PAXG-ticker is an ESP32 firmware project for the LILYGO T-Display S3. The device presents PAX Gold (PAXG) market data and utility dashboards on the built-in display.
 
 ## Features
