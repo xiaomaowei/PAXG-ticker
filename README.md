@@ -1,5 +1,7 @@
 # PAXG-ticker
 
+**Documentation:** [English](README.md) · [繁體中文](README.zh-TW.md)
+
 PAXG-ticker is an ESP32-S3 firmware project for the LILYGO T-Display S3. The device delivers a dedicated firmware integrating the real **WoW Fishing Screen** powered by real USB UAC 2.0 audio capture, USB HID composite keyboard control, an evidence-based **Bag-Full Audio Stop** detector, and a local **LAN Fishing Status & Control Web UI**.
 
 ## Features
