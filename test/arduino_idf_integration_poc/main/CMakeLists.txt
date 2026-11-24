@@ -3,6 +3,11 @@ idf_component_register(
         "main.cpp"
         "uac_audio_bridge.cpp"
         "live_fishing_controller.cpp"
+        "bag_full_detector.cpp"
+        "fishing_web_server.cpp"
+        "fishing_wifi_settings.cpp"
+        "mode_navigator.cpp"
+        "paxg_async_quote.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../src/audio/pcm_audio_detector.cpp"
     INCLUDE_DIRS
         "."
@@ -11,4 +16,6 @@ idf_component_register(
         arduino
         TFT_eSPI
         usb_device_composite
+        esp_http_server
+        nvs_flash
 )

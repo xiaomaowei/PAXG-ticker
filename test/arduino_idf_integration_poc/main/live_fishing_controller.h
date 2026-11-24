@@ -22,6 +22,7 @@ enum class StopReason : int {
     PressFailure,
     ErrorState,
     CycleCompleted,
+    BagFull,
 };
 
 inline const char* getStopReasonName(StopReason reason) {
@@ -37,6 +38,7 @@ inline const char* getStopReasonName(StopReason reason) {
         case StopReason::PressFailure: return "PRESS_FAILURE";
         case StopReason::ErrorState: return "ERROR_STATE";
         case StopReason::CycleCompleted: return "CYCLE_COMPLETED";
+        case StopReason::BagFull: return "BAG_FULL";
         default: return "UNKNOWN";
     }
 }
@@ -74,6 +76,9 @@ public:
     virtual bool isTriggered() const = 0;
     virtual void clearTrigger() = 0;
     virtual float getRms() const = 0;
+    virtual bool isBagFull() const { return false; }
+    virtual bool isBellContinuing(uint32_t nowMs = 0) const { (void)nowMs; return false; }
+    virtual void clearBagFull() {}
 };
 
 /**
@@ -85,6 +90,16 @@ enum class KeyState : int {
     Pressed,         // Key successfully accepted by HID, actively held down
     Releasing,       // Hold duration expired or stop requested, retrying release until accepted
 };
+
+inline const char* getKeyStateName(KeyState state) {
+    switch (state) {
+        case KeyState::Idle: return "IDLE";
+        case KeyState::PendingPress: return "PENDING_PRESS";
+        case KeyState::Pressed: return "PRESSED";
+        case KeyState::Releasing: return "RELEASING";
+        default: return "UNKNOWN";
+    }
+}
 
 /**
  * @brief Live fishing controller with explicit safety arming, fail-closed guards,
@@ -148,6 +163,10 @@ public:
     uint32_t getTotalBites() const { return totalBites_; }
     uint32_t getTotalReels() const { return totalReels_; }
     uint32_t getTotalTimeouts() const { return totalTimeouts_; }
+    uint32_t getCasts() const { return totalCasts_; }
+    uint32_t getBites() const { return totalBites_; }
+    uint32_t getReels() const { return totalReels_; }
+    uint32_t getTimeouts() const { return totalTimeouts_; }
     uint32_t getStateDurationMs() const;
     uint32_t getWaitRemainingMs() const;
     uint32_t getCastAcceptedTime() const { return castAcceptedTime_; }
@@ -155,6 +174,7 @@ public:
 
     // Manual control interfaces
     bool requestArmToggle();
+    void disarm();
     bool requestStart();
     void requestStop(StopReason reason = StopReason::UserStopped);
 

@@ -163,15 +163,28 @@ bool LiveFishingController::requestArmToggle() {
         requireButtonsReleaseAfterArm_ = true;
         armPacketsBaseline_ = audioStream_ ? audioStream_->getPacketsReceived() : 0;
     } else {
-        armed_ = false;
-        requireButtonsReleaseAfterArm_ = false;
-        requestStop(StopReason::UserDisarmed);
+        disarm();
     }
     return armed_;
 }
 
+void LiveFishingController::disarm() {
+    armed_ = false;
+    requireButtonsReleaseAfterArm_ = false;
+    requestStop(StopReason::UserDisarmed);
+}
+
 bool LiveFishingController::requestStart() {
     if (!armed_ || !hid_ || !clock_ || !audioStream_) {
+        return false;
+    }
+
+    const uint32_t now = clock_->nowMs();
+
+    // Refuse to start if full-bag stop condition is confirmed/latched
+    if (audioStream_->isBagFull()) {
+        armed_ = false;
+        lastStopReason_ = StopReason::BagFull;
         return false;
     }
 
@@ -184,7 +197,6 @@ bool LiveFishingController::requestStart() {
         return false;
     }
 
-    const uint32_t now = clock_->nowMs();
     pollAudioFreshness(now);
 
     const uint64_t currentPackets = audioStream_->getPacketsReceived();
@@ -260,6 +272,17 @@ void LiveFishingController::requestStop(StopReason reason) {
 }
 
 void LiveFishingController::checkSafetyGuards(uint32_t now) {
+    // 0. Guard against BagFull condition AT ALL TIMES (even while in Idle)
+    if (audioStream_ && audioStream_->isBagFull()) {
+        if (armed_ || fsm_.getState() != FishingState::Idle) {
+            requestStop(StopReason::BagFull);
+            armed_ = false;
+            return;
+        } else if (lastStopReason_ != StopReason::BagFull) {
+            lastStopReason_ = StopReason::BagFull;
+        }
+    }
+
     // 1. Guard against USB unmount / suspend AT ALL TIMES (even while in Idle)
     if (!hid_ || !hid_->isMounted()) {
         if (armed_ || fsm_.getState() != FishingState::Idle || keyState_ != KeyState::Idle) {
@@ -418,6 +441,11 @@ void LiveFishingController::processFsm(uint32_t now) {
 
         case FishingState::Waiting: {
             const uint32_t elapsedSinceCast = now - castAcceptedTime_;
+            if (audioStream_ && audioStream_->isBagFull()) {
+                requestStop(StopReason::BagFull);
+                armed_ = false;
+                return;
+            }
             // Deadline check takes strict priority at or after GAME_CAST_DURATION_MS (30,000ms):
             // Accept bite ONLY while elapsed since accepted cast press is strictly under 30000ms.
             // Once 30s has expired, any acoustic trigger is considered outdated sound.

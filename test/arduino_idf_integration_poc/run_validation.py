@@ -35,11 +35,28 @@ OWNED_TEST_ARTIFACTS = [
     TEST_DIR / "test_live_fishing_controller_native.exe",
     TEST_DIR / "test_live_fishing_controller_native.pdb",
     TEST_DIR / "test_live_fishing_controller_native.ilk",
+    TEST_DIR / "test_paxg_integration_native.exe",
+    TEST_DIR / "test_paxg_integration_native.pdb",
+    TEST_DIR / "test_paxg_integration_native.ilk",
+    TEST_DIR / "test_bag_full_web_native.exe",
+    TEST_DIR / "test_bag_full_web_native.pdb",
+    TEST_DIR / "test_bag_full_web_native.ilk",
+    TEST_DIR / "test_fishing_wifi_settings_native.exe",
+    TEST_DIR / "test_fishing_wifi_settings_native.pdb",
+    TEST_DIR / "test_fishing_wifi_settings_native.ilk",
     TEST_DIR / "uac_audio_bridge_cross.o",
     TEST_DIR / "test_uac_audio_bridge_cross.o",
     TEST_DIR / "pcm_audio_detector_cross.o",
     TEST_DIR / "live_fishing_controller_cross.o",
     TEST_DIR / "test_live_fishing_controller_cross.o",
+    TEST_DIR / "mode_navigator_cross.o",
+    TEST_DIR / "paxg_async_quote_cross.o",
+    TEST_DIR / "test_paxg_integration_cross.o",
+    TEST_DIR / "bag_full_detector_cross.o",
+    TEST_DIR / "fishing_web_server_cross.o",
+    TEST_DIR / "test_bag_full_web_cross.o",
+    TEST_DIR / "fishing_wifi_settings_cross.o",
+    TEST_DIR / "test_fishing_wifi_settings_cross.o",
 ]
 
 def find_nm_tool():
@@ -207,14 +224,112 @@ def run_native_pipeline_tests():
     if ctrl_pdb.is_file():
         ctrl_pdb.unlink(missing_ok=True)
 
+    # 3. Compile and run PAXG market & mode switching integration unit tests
+    print("\n--- Running PAXG Market & Mode Switching Native Integration Tests ---")
+    paxg_test_src = TEST_DIR / "test_paxg_integration.cpp"
+    paxg_quote_src = MAIN_DIR / "paxg_async_quote.cpp"
+    mode_nav_src = MAIN_DIR / "mode_navigator.cpp"
+    paxg_exe = TEST_DIR / "test_paxg_integration_native.exe"
+
+    compile_paxg_cmd = cxx + [
+        "-std=c++11", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(REPO_ROOT / "include"),
+        "-I" + str(MAIN_DIR),
+        str(paxg_test_src), str(paxg_quote_src), str(ctrl_src), str(mode_nav_src),
+        "-o", str(paxg_exe)
+    ]
+    res_paxg_compile = subprocess.run(compile_paxg_cmd, capture_output=True, text=True)
+    if res_paxg_compile.returncode != 0:
+        print(f"[FAIL] Native PAXG integration test compilation failed:\n{res_paxg_compile.stderr}")
+        sys.exit(res_paxg_compile.returncode)
+    print("  [PASS] Native PAXG integration test suite compiled cleanly.")
+
+    res_paxg_run = subprocess.run([str(paxg_exe)], capture_output=True, text=True)
+    print(res_paxg_run.stdout)
+    if res_paxg_run.returncode != 0:
+        print(f"[FAIL] Native PAXG integration test assertions failed with exit code {res_paxg_run.returncode}")
+        paxg_exe.unlink(missing_ok=True)
+        sys.exit(res_paxg_run.returncode)
+    print("  -> ALL 17 NATIVE PAXG INTEGRATION TESTS EXECUTED AND PASSED.")
+
+    paxg_exe.unlink(missing_ok=True)
+    paxg_pdb = TEST_DIR / "test_paxg_integration_native.pdb"
+    if paxg_pdb.is_file():
+        paxg_pdb.unlink(missing_ok=True)
+
+    # 4. Compile and run Bag-Full Audio Stop & LAN Web Server unit tests
+    print("\n--- Running Bag-Full Audio Stop & LAN Web Server Native Tests ---")
+    bag_test_src = TEST_DIR / "test_bag_full_web.cpp"
+    bag_detector_src = MAIN_DIR / "bag_full_detector.cpp"
+    web_server_src = MAIN_DIR / "fishing_web_server.cpp"
+    bag_exe = TEST_DIR / "test_bag_full_web_native.exe"
+
+    compile_bag_cmd = cxx + [
+        "-std=c++11", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(REPO_ROOT / "include"),
+        "-I" + str(MAIN_DIR),
+        str(bag_test_src), str(bag_detector_src), str(web_server_src), str(MAIN_DIR / "fishing_wifi_settings.cpp"), str(ctrl_src), str(bridge_src), str(detector_src),
+        "-o", str(bag_exe)
+    ]
+    res_bag_compile = subprocess.run(compile_bag_cmd, capture_output=True, text=True)
+    if res_bag_compile.returncode != 0:
+        print(f"[FAIL] Native Bag-Full & Web Server test compilation failed:\n{res_bag_compile.stderr}")
+        sys.exit(res_bag_compile.returncode)
+    print("  [PASS] Native Bag-Full & Web Server test suite compiled cleanly.")
+
+    res_bag_run = subprocess.run([str(bag_exe)], capture_output=True, text=True)
+    print(res_bag_run.stdout)
+    if res_bag_run.returncode != 0:
+        print(f"[FAIL] Native Bag-Full & Web Server test assertions failed with exit code {res_bag_run.returncode}")
+        bag_exe.unlink(missing_ok=True)
+        sys.exit(res_bag_run.returncode)
+    print("  -> ALL 19 NATIVE BAG-FULL & WEB SERVER TESTS EXECUTED AND PASSED.")
+
+    bag_exe.unlink(missing_ok=True)
+    bag_pdb = TEST_DIR / "test_bag_full_web_native.pdb"
+    if bag_pdb.is_file():
+        bag_pdb.unlink(missing_ok=True)
+
+    # 5. Compile and run Wi-Fi Settings & Recovery Manager unit tests
+    print("\n--- Running Wi-Fi Settings & Recovery Manager Native Tests ---")
+    wifi_test_src = TEST_DIR / "test_fishing_wifi_settings.cpp"
+    wifi_settings_src = MAIN_DIR / "fishing_wifi_settings.cpp"
+    wifi_exe = TEST_DIR / "test_fishing_wifi_settings_native.exe"
+
+    compile_wifi_cmd = cxx + [
+        "-std=c++11", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(REPO_ROOT / "include"),
+        "-I" + str(MAIN_DIR),
+        str(wifi_test_src), str(wifi_settings_src), str(web_server_src), str(bag_detector_src), str(ctrl_src), str(bridge_src), str(detector_src),
+        "-o", str(wifi_exe)
+    ]
+    res_wifi_compile = subprocess.run(compile_wifi_cmd, capture_output=True, text=True)
+    if res_wifi_compile.returncode != 0:
+        print(f"[FAIL] Native Wi-Fi Settings test compilation failed:\n{res_wifi_compile.stderr}")
+        sys.exit(res_wifi_compile.returncode)
+    print("  [PASS] Native Wi-Fi Settings test suite compiled cleanly.")
+
+    res_wifi_run = subprocess.run([str(wifi_exe)], capture_output=True, text=True)
+    print(res_wifi_run.stdout)
+    if res_wifi_run.returncode != 0:
+        print(f"[FAIL] Native Wi-Fi Settings test assertions failed with exit code {res_wifi_run.returncode}")
+        wifi_exe.unlink(missing_ok=True)
+        sys.exit(res_wifi_run.returncode)
+    print("  -> ALL 11 NATIVE WI-FI SETTINGS & RECOVERY TESTS EXECUTED AND PASSED.")
+
+    wifi_exe.unlink(missing_ok=True)
+    wifi_pdb = TEST_DIR / "test_fishing_wifi_settings_native.pdb"
+    if wifi_pdb.is_file():
+        wifi_pdb.unlink(missing_ok=True)
+
     # Cross-compile check with xtensa-esp32s3-elf-g++
     xtensa_gpp = find_xtensa_gpp()
     if not xtensa_gpp:
         print("[FAIL] Required xtensa-esp32s3-elf-g++ not found on system.")
         sys.exit(1)
 
-    print("\n  Cross-compiling bridge, controller and test sources with xtensa-esp32s3-elf-g++...")
-    for src in [bridge_src, test_src, ctrl_src, ctrl_test_src, detector_src, queue_src]:
+    print("\n  Cross-compiling bridge, controller, quote, bag-full, web server, wifi settings and test sources with xtensa-esp32s3-elf-g++...")
+    for src in [bridge_src, test_src, ctrl_src, ctrl_test_src, detector_src, queue_src, paxg_quote_src, paxg_test_src, mode_nav_src, bag_detector_src, web_server_src, bag_test_src, wifi_settings_src, wifi_test_src]:
         obj = TEST_DIR / f"{src.stem}_cross.o"
         compiler = xtensa_gpp
         std_flag = "-std=gnu++11"
@@ -306,6 +421,16 @@ def verify_elf_artifacts_and_symbols():
         ("usb_composite_get_audio_stats", "Composite Driver Audio Queue Telemetry"),
         ("paxg::fishing::LiveFishingController::update", "Live Fishing Controller Main Update Loop"),
         ("paxg::fishing::LiveFishingController::requestStart", "Live Fishing Controller Start Operation"),
+        ("paxg::market::parseBinanceTicker", "Binance Ticker JSON Parser"),
+        ("paxg::market::getMarketQuoteSnapshot", "Thread-Safe Market Quote Telemetry"),
+        ("paxg::market::startPaxgQuoteWorker", "Bounded Async Network Worker Task"),
+        ("paxg::market::evaluateMarketSessions", "Market Sessions Evaluator"),
+        ("paxg::ui::ModeNavigator::update", "Mode Navigator Loop Update"),
+        ("paxg::audio::BagFullDetector::processRms", "Evidence-Calibrated Bag-Full Audio Detector"),
+        ("paxg::web::startFishingWebServer", "LAN Fishing Status and Web Server"),
+        ("paxg::web::processPendingCommands", "Owner-Loop Thread-Safe Command Queue Processor"),
+        ("paxg::wifi::getWifiSettingsManager", "Wi-Fi Settings & Recovery Manager"),
+        ("paxg::wifi::WifiSettingsManager::update", "Wi-Fi Settings Manager Loop Update"),
     ]
 
     all_found = True

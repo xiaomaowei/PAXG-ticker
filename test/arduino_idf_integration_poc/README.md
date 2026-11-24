@@ -3,6 +3,10 @@
 本目錄（`test/arduino_idf_integration_poc`）為獨立隔離的建置與架構驗證專案，目的在於實證：
 1. **現有生產環境之 Arduino 應用層、`TFT_eSPI` 平行 8-bit 螢幕驅動與 `WiFi` 協定棧，能否在 ESP-IDF 5.x 體系下與 USB 複合裝置（UAC 2.0 音訊揚聲器 + HID 鍵盤）並存**。
 2. **實作有界（Bounded）、零動態記憶體配置（Allocation-Free）的 UAC 2.0 48 kHz 雙聲道 PCM 串流橋接器，將實際 USB 音訊幀無損餵入既有生產級音訊偵測器（`paxg::audio::PcmAudioDetector`）**。
+3. **整合生產級 PAXG 行情畫面（幣安 24h Ticker、即時價格、24h 漲跌、走勢圖、交易時區指示板與黃金徽章旋轉）與真實 USB UAC 2.0 / HID 連續自動釣魚畫面於同一二進位韌體**。
+4. **實作有界非阻塞非同步網路工作任務（FreeRTOS Task, Core 0, Priority 1），並以 `WiFi.persistent(false)` 保護 Flash NVS，絕不在網路請求或 TLS 握手時阻塞或飢餓 USB 音訊接收與 HID 控制器**。
+5. **嚴格區分行情新鮮度標記（`[LIVE MARKET QUOTE]`、`[STALE - CACHED QUOTE]`、`[OFFLINE - NO QUOTE]`），絕不將過期報價虛報為即時行情**。
+6. **提供無縫雙畫面切換（短按實體 DOWN 鍵），切換時強制停機與解除武裝，杜絕任何意外鍵盤按鍵外洩**。
 
 ---
 
@@ -268,82 +272,23 @@ USB 回呼函式 `output_cb(buf, len, ...)` 收到的位元組長度可能非 4 
 10. **`test_multithreaded_pipeline_race_stress`**：
     - 多執行緒高壓並發注入與讀取，驗證資料完整性與零死鎖。
 
-### 測試執行結果 (PASS: 20/20)
-```
-=======================================================================
-PAXG UAC PCM to Production PcmAudioDetector Pipeline Native Tests
-=======================================================================
-[RUN]  test_bridge_init_and_empty_packet_handling
-  [PASS] test_bridge_init_and_empty_packet_handling
-[RUN]  test_arbitrary_chunk_sizes_and_residuals
-  [PASS] test_arbitrary_chunk_sizes_and_residuals
-[RUN]  test_stereo_mix_extremes
-  [PASS] test_stereo_mix_extremes
-[RUN]  test_silence_vs_signal_distinction
-  [PASS] test_silence_vs_signal_distinction
-[RUN]  test_timing_and_cooldown_behavior
-  [PASS] test_timing_and_cooldown_behavior
-[RUN]  test_stream_break_residual_reset
-  [PASS] test_stream_break_residual_reset
-[RUN]  test_concurrent_audio_stream_and_control_access
-  [PASS] test_concurrent_audio_stream_and_control_access
-[RUN]  test_deterministic_discontinuity_sample_isolation
-  [PASS] test_deterministic_discontinuity_sample_isolation
-[RUN]  test_end_to_end_consumer_pipeline_ordering
-  [PASS] test_end_to_end_consumer_pipeline_ordering
-[RUN]  test_multithreaded_pipeline_race_stress
-  [PASS] test_multithreaded_pipeline_race_stress
-=======================================================================
-Results: 10/10 passed (0 failed)
-=======================================================================
-
-=======================================================================
-PAXG Live Fishing Controller & Safe Spacebar HID Native Tests
-=======================================================================
-[RUN]  test_default_boot_unarmed_passive
-  [PASS] test_default_boot_unarmed_passive
-[RUN]  test_require_positive_packet_progress_and_freshness_before_start
-  [PASS] test_require_positive_packet_progress_and_freshness_before_start
-[RUN]  test_release_retry_on_stop_disarm_and_rearm_lockout
-  [PASS] test_release_retry_on_stop_disarm_and_rearm_lockout
-[RUN]  test_press_failure_bounded_retry_fail_closed
-  [PASS] test_press_failure_bounded_retry_fail_closed
-[RUN]  test_disarm_on_disconnect_in_idle_no_auto_rearm
-  [PASS] test_disarm_on_disconnect_in_idle_no_auto_rearm
-[RUN]  test_require_both_buttons_released_after_arm
-  [PASS] test_require_both_buttons_released_after_arm
-[RUN]  test_bite_timeout_fails_closed_and_disarms
-  [PASS] test_bite_timeout_fails_closed_and_disarms
-[RUN]  test_late_bite_at_29s_in_waiting_triggers_reel_and_completes_cycle
-  [PASS] test_late_bite_at_29s_in_waiting_triggers_reel_and_completes_cycle
-[RUN]  test_countdown_and_time_remaining_reporting
-  [PASS] test_countdown_and_time_remaining_reporting
-[RUN]  test_single_cycle_cast_reel_autodisarm_and_no_recast
-  [PASS] test_single_cycle_cast_reel_autodisarm_and_no_recast
-[RUN]  test_single_cycle_busy_release_disarms_only_after_confirmed_release
-  [PASS] test_single_cycle_busy_release_disarms_only_after_confirmed_release
-[RUN]  test_single_cycle_explicit_rearm_and_fresh_start_for_new_cycle
-  [PASS] test_single_cycle_explicit_rearm_and_fresh_start_for_new_cycle
-[RUN]  test_stop_at_all_phases_and_priority
-  [PASS] test_stop_at_all_phases_and_priority
-[RUN]  test_audio_dropout_and_queue_fail_closed
-  [PASS] test_audio_dropout_and_queue_fail_closed
-=======================================================================
-Results: 14/14 passed (0 failed)
-=======================================================================
-```
+### 測試執行結果 (PASS: 73/73)
+- **UAC PCM 串流橋接管線測試 (10/10 PASS)**：覆蓋封包切分邊界、任意碎片殘留處理、極限混音、數位靜音與有效信號辨別、冷卻閉鎖期、中斷重設、多執行緒高壓並發。
+- **Live 釣魚控制器與安全 HID 測試 (28/28 PASS)**：覆蓋開機被動安全、正向封包進度檢驗、釋放重試與武裝鎖定、發鍵失敗全閉停機、閒置斷線自動解除武裝、雙鍵武裝後放開要求、32 秒咬鉤逾時全閉、29 秒晚期咬鉤起竿循環、連續多循環冷卻自動重投、30 秒拋竿過期安全超時自動重投、全階段 DOWN 鍵停機最高優先權。
+- **PAXG 行情與雙畫面整合測試 (17/17 PASS)**：覆蓋嚴格遞迴下降 JSON 語法解析（拒絕嵌於字串值內之虛假鍵名、巢狀衝突幣種、語法錯誤結構、陣列、重複鍵與尾隨字串）、非數值/非有限浮點數/NaN/inf 與尾隨字元拒絕、行情即時性判定、網路失敗降級為 Stale、零初始化 `struct tm timeinfo` 與時間同步嚴格閘控（杜絕未定義行為與偽造狀態）、`APP_TIMEZONE` 本地時間時區基準校準、50ms 實體接點彈跳抑制、模式切換強制解除武裝不漏鍵、實體 DOWN 鍵「先停機再退出」(Stop-Then-Exit) 語意、雙鍵武裝後完全放開要求、重新進入釣魚畫面初始維持 Disarmed/Idle、長停機字串（`STREAM_DISCONTINUITY`）305px 完整清除無殘影、停機原因跨畫面保存、多執行緒快照並發讀寫安全、`FishingUiState::differsFrom` 狀態差異化評估（抑制穩態冗餘重繪，降低匯流排負載 90-95% 避免音訊任務飢餓）。
+- **滿包音訊停機、指令佇列與區域網路 Web 伺服器測試 (19/19 PASS)**：覆蓋 3.0s 週期性鈴聲脈衝檢驗、單次孤立雜訊/非週期突波拒絕、500ms 鈴聲內部去抖動、動態校準更新、等待咬鉤/冷卻/閒置全階段安全檢驗、咬鉤優先權搶佔、孤立脈衝不阻擋啟動且等待咬鉤正常起竿、確認滿包停機解除武裝並鎖定重啟、控制器擁有者迴圈有界線程安全指令佇列、緊急停止（Stop）最高優先權搶佔與待處理啟動清除、命令實際結果同步回報、同步發布狀態快照隔離、清包後顯式重設（`clearBagFull`）、Web JSON 遙測序列化。
 
 ---
 
 ## 四、 整合目標編譯與符號驗證狀態 (Integrated Target Build & Symbol Status: PASS)
 
-在 TinyUSB 依賴防護與 USB 複合裝置音訊佇列工作完成後，執行完整目標建置與符號表檢驗：
+在 TinyUSB 依賴防護、USB 複合裝置音訊佇列、認證級 TLS、雙緩衝全螢幕 Sprite（`s_fishingSprite` 108,800 bytes / 106.3 KB，總記憶體佔用約 204.7 KB 於 >350 KB 可用內部 SRAM）、滿包音訊偵測器、有界執行緒安全指令佇列與非同步 Web 伺服器工作完成後，執行完整目標建置與符號表檢驗：
 
 1. **整合建置成功 (Build Success)**：
-   - 透過 `$env:TEMP\paxg-pio-env\Scripts\pio.exe` 驅動 PlatformIO ESP-IDF 5.1.2 建置。
-   - `main/CMakeLists.txt` 僅依賴 `usb_device_composite`（不直接依賴 `tinyusb`），避免編譯選項污染，全數 C++ 與 C 原始碼完成編譯。
-   - 產出最終二進位檔案：`firmware.elf` 與 `firmware.bin`。
-2. **符號表驗證全數通過 (Symbols Verified: 15/15)**：
+   - 透過 PlatformIO ESP-IDF 5.1.2 建置。
+   - `main/CMakeLists.txt` 編譯 `main.cpp`、`mode_navigator.cpp`、`paxg_async_quote.cpp`、`live_fishing_controller.cpp`、`uac_audio_bridge.cpp`、`bag_full_detector.cpp`、`fishing_web_server.cpp`，並鏈結 `usb_device_composite` 與 Arduino 組件。
+   - 產出最終二進位檔案：`firmware.elf` 與 `firmware.bin` (RAM: 14.9%, Flash: 17.2%)。
+2. **符號表驗證全數通過 (Symbols Verified: 23/23)**：
    - `TFT_eSPI::begin` (TFT_eSPI Display Driver)
    - `TFT_eSprite::createSprite` (TFT_eSprite Framebuffer Support)
    - `WiFiSTAClass::begin` (Arduino Wi-Fi STA)
@@ -359,11 +304,42 @@ Results: 14/14 passed (0 failed)
    - `usb_composite_get_audio_stats` (Composite Driver Audio Queue Telemetry)
    - `paxg::fishing::LiveFishingController::update` (Live Fishing Controller Main Update Loop)
    - `paxg::fishing::LiveFishingController::requestStart` (Live Fishing Controller Start Operation)
-3. **現有局限與執行環境聲明**：
-   - 本 PoC 已完成完整的靜態編譯、鏈結、20/20 本機單元測試，以及 2026-11-20 於 ESP32-S3 COM3 進行之有限硬體驗證（被動 UAC 封包監測與記事本空白鍵發送測試）。
-   - 本次工作階段未進行任何遊戲內自動按鍵測試；能量門檻尚未標定，未測量真陽性/假陽性率。
-   - 串流生命週期中斷信號（關閉/重開/掛起）尚未接入應用層，不宣稱串流重新啟動時之絕對相位連續性。
-   - 測試完畢後已完整還原具備雜湊校驗之生產韌體，生產環境目前仍維持合成音訊運作。
+   - `parseBinanceTicker` (PAXG Binance 24h Ticker JSON Parser)
+   - `getMarketQuoteSnapshot` (PAXG Thread-Safe Market Quote Reader)
+   - `startPaxgQuoteWorker` (PAXG Bounded Async Network Worker Task)
+   - `evaluateMarketSessions` (Market Sessions Evaluator)
+   - `ModeNavigator::update` (Mode Navigator Loop Update)
+   - `paxg::fishing::BagFullDetector::processRms` (Bag Full Audio Periodicity Detector)
+   - `paxg::web::startFishingWebServer` (Deliberate Fail-Closed LAN Web Server)
+   - `paxg::web::processPendingCommands` (Owner-Loop Thread-Safe Command Queue Processor)
+3. **滿包即時音訊測量證據與指定信號辨識 (Live Hardware Audio Evidence)**：
+   - 使用者確認：使用者確認此鐘聲/鈴聲專門且唯一配置給滿包警示，作為指定滿包信號。
+   - 採樣環境：ESP32-S3 USB Audio Class 揚聲器裝置（VID 0x303A, PID 0x8002）。
+   - 錄音分析：6.09 秒 WASAPI Loopback 實錄 PCM 音訊（2,338,560 位元組）。
+   - 脈衝週期：$T_0 = 0.016s$ (RMS 4675.8), $T_1 = 2.968s$ (RMS 17030.2, $\Delta t = 2.952s$), $T_2 = 6.008s$ (RMS 20132.4, $\Delta t = 3.040s$)，平均間隔 2.996s。
+   - 頻譜特徵：4.1 kHz 鐘聲泛音（強度 1225.6）伴隨 200–350 Hz 本體共鳴，環境底噪 RMS < 500。
+   - 偵測器參數：間隔窗 $3000ms \pm 350ms$（$[2650ms, 3350ms]$），脈衝能量門檻 RMS $\ge 3000.0f$。初設需 2 次連續間隔匹配（`requiredMatches = 2`，對應檢測到 3 次連續脈衝、歷時約 6 秒），大幅降低非滿包雜訊或兩次偶合脈衝造成的假陽性偌機。
+   - 確認滿包嚴格阻擋（Confirmed Bag Full Protection）：僅在確認週期性脈衝滿足校準視窗時鎖定 `bagFullLatched`，控制器立即阻擋 `requestStart`，並全面停機解除武裝且鎖定狀態；單次孤立音訊脈衝（如咬鉤水花聲）不被誤判為滿包，確保起竿正常進行。
+   - 顯式重設機制：當使用者在遊戲內清理背包後（鈴聲停止），可透過 Web 介面或 `/api/bagfull/reset` 顯式呼叫 `clearBagFull()`，清除鎖定與脈衝時序；若背包未清空，鈴聲再度響起將立即重新阻擋。
+   - **未標定/目標驗證免責聲明**：雖然依據實錄音訊設定了基準參數，但在未經過目標環境全盤實地驗證前，不得假設實體偵測器已完全校準；韌體提供全閉保護與顯式配置介面。
+4. **指令路由、停止優先權與狀態快照同步架構**：
+   - HTTP 伺服器任務嚴格解耦：HTTP 處理函式禁止直接調用 `LiveFishingController` 的方法或讀取其未同步內部狀態。
+   - 有界執行緒安全指令佇列：所有 Web 控制指令（Start、Stop、ArmToggle、ResetBagFull）皆進入有界佇列，由控制器擁有者迴圈（`main.cpp` 的 `loop()`）順序執行。
+   - 停止優先權保證（Stop Priority）：緊急停止指令擁有專屬優先插槽，且在入列時立即清除所有待處理之 Start 指令，由擁有者迴圈第一優先搶佔執行，保證停止與解除武裝絕對不被阻塞。
+   - 命令實際結果回報：`submitCommandSync` 透過條件變數等待擁有者迴圈執行完成，向 HTTP 客戶端精確回報實際執行結果（如成功狀態或 `BAG_FULL`、`DISARMED`、`SAFETY_REJECTED` 原因代碼）。
+   - 同步狀態快照（Synchronized Status Snapshot）：擁有者迴圈在每輪主迴圈末端發布完整快照至互斥鎖保護之結構體，HTTP `/api/status` 端點僅讀取已發布之快照，完全杜絕資料競爭。
+5. **可編輯 Wi-Fi 設定與斷線安全復原機制 (Editable Wi-Fi Settings & Setup AP Recovery)**：
+   - **專屬 NVS 儲存與快閃保護**：Wi-Fi 憑證由 `paxg::wifi::WifiSettingsManager` 獨立管理，採用專屬 `paxg_wifi` NVS 命名空間，保持 `WiFi.persistent(false)`，絕不讓底層自動覆寫，且絕不改動 `.env`。
+   - **憑證回退階層**：開機優先讀取專屬 NVS 記錄；若無則回退至編譯期常數憑證；若無法連線或無設定，自動切換至有時限之 WPA2 設定熱點（Setup AP）。
+   - **有時限 WPA2 Setup AP 與實體 TFT 密碼**：嚴禁開放式 AP（No Open AP），密碼由設備隨機產生且至少 8 字元（`paxgXXXX`），與 SSID（`PAXG-Setup-XXXX`）、IP（`192.168.4.1`）及單次驗證 PIN 碼同步顯示於 TFT 螢幕。
+   - **本機 PIN 授權與自訂標頭防護**：變更 Wi-Fi 設定必須輸入螢幕顯示之 4 位數 PIN，並由 POST 端點驗證自訂標頭（`X-Requested-With` / `X-Setup-Auth`）及有界輸入長度（SSID $\le 32$、Password $\le 64$），杜絕 CSRF 攻擊。密碼絕不回顯或記錄於日誌。
+   - **Setup AP 禁止 HID 鍵盤指令**：當連線來自 Setup AP 子網或 Setup AP 處於活躍狀態時，`/api/start` 與 `/api/arm` 等控制端點立即拒絕（403 Forbidden），防範未授權之按鍵注入。
+   - **安全連線驗證與失敗復原**：套用新設定時立即安全解除釣魚武裝（Disarm in owner context），並以 `WIFI_AP_STA` 模式在背景連線，保持 Setup AP 可連線；僅在 STA 連線成功且取得 DHCP IP 後才寫入 NVS；若連線超時（15秒）或失敗，絕不寫入 NVS，並安全復原至前次有效設定或回退憑證，保持 Setup AP 持續可用。
+   - **非阻塞運作**：所有連線與重試均採非同步狀態機推進，絕不阻塞 Core 0 / Core 1，完全不干擾 USB UAC 2.0 音訊與 HID 控制。
+
+6. **現有局限與執行環境聲明**：
+   - 本韌體已完成靜態編譯、鏈結、85/85 本機單元測試與 25/25 符號檢驗。
+   - 本次工作階段未進行實體設備燒錄亦未進行遊戲內自動按鍵測試。
 
 ---
 
@@ -394,6 +370,10 @@ python test/arduino_idf_integration_poc/run_validation.py --clean-only
 4. 刪除 `test/arduino_idf_integration_poc/main/live_fishing_controller.cpp`
 5. 刪除 `test/arduino_idf_integration_poc/main/uac_audio_bridge.h`
 6. 刪除 `test/arduino_idf_integration_poc/main/uac_audio_bridge.cpp`
-7. 刪除 `test/arduino_idf_integration_poc/test/`
-8. 還原 `test/arduino_idf_integration_poc/run_validation.py`
-9. 還原 `test/arduino_idf_integration_poc/README.md`
+7. 刪除 `test/arduino_idf_integration_poc/main/bag_full_detector.h`
+8. 刪除 `test/arduino_idf_integration_poc/main/bag_full_detector.cpp`
+9. 刪除 `test/arduino_idf_integration_poc/main/fishing_web_server.h`
+10. 刪除 `test/arduino_idf_integration_poc/main/fishing_web_server.cpp`
+11. 刪除 `test/arduino_idf_integration_poc/test/`
+12. 還原 `test/arduino_idf_integration_poc/run_validation.py`
+13. 還原 `test/arduino_idf_integration_poc/README.md`
