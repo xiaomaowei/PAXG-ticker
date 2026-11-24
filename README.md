@@ -1,8 +1,29 @@
 # PAXG-ticker
 
-**Documentation:** [English](README.md) · [繁體中文](README.zh-TW.md)
+**Documentation:** [English](README.md) · [繁體中文](README.zh-TW.md) · [OTA 更新維護手冊 (docs/OTA.md)](docs/OTA.md)
 
 PAXG-ticker is an ESP32-S3 firmware project for the LILYGO T-Display S3. The device delivers a dedicated firmware integrating the real **WoW Fishing Screen** powered by real USB UAC 2.0 audio capture, USB HID composite keyboard control, an evidence-based **Bag-Full Audio Stop** detector, and a local **LAN Fishing Status & Control Web UI**.
+
+> [!TIP]
+> **OTA 無線更新快速導覽 (OTA Quick Overview)**
+>
+> 整合目標韌體（`esp32s3_arduino_idf_poc`）現已支援局域網 HTTP OTA 無線部署與雙槽回退機制。詳細架構、初次 USB 完整重刷步驟與 Cloudflare WARP /32 遠端通道配置請參閱完整手冊：
+> 📖 **[docs/OTA.md (OTA 建置與維護手冊)](docs/OTA.md)**
+>
+> 常用部署指令（Windows PowerShell 7，上傳必須指定 `--device-id` 鎖定硬體身分）：
+> ```powershell
+> # 1. 離線本地二進位檔檢查
+> python scripts/deploy_ota.py --dry-run
+>
+> # 2. 設定目標裝置連線變數（以下範例值請替換為實際環境數值）
+> $otaHost = '192.168.1.50'
+> $otaDeviceId = '0123456789ab'
+>
+> # 3. 安全遮蔽輸入 64 字元十六進位 Token，傳遞後立即自記憶體清除環境變數
+> $env:PAXG_OTA_TOKEN = Read-Host "請輸入裝置 LCD 顯示之 64 字元 OTA Token" -MaskInput
+> python scripts/deploy_ota.py --host $otaHost --device-id $otaDeviceId --build
+> Remove-Item Env:PAXG_OTA_TOKEN
+> ```
 
 ## Features
 
@@ -18,7 +39,7 @@ PAXG-ticker is an ESP32-S3 firmware project for the LILYGO T-Display S3. The dev
   - **Strict Precedence & Fail-Closed Disarm**: When a full-bag condition is identified, the controller halts immediately, sets `StopReason::BagFull`, disarms (`armed_ = false`), clears bite triggers, safely releases any pressed keys, and prevents automatic recast or restart.
   - **Calibration Mechanism & Disclaimer**: Uncalibrated detector reliability is explicitly disclaimed. The firmware provides a safe calibration mechanism via `/api/calibrate` and `BagFullCalibration` to adjust interval and threshold parameters.
 - **LAN Web UI & Local Control API**:
-  - Built on native ESP-IDF `esp_http_server` running on Core 0 at priority 1 (strictly below TinyUSB audio task priority 5), ensuring network requests can never starve or block isochronous audio streaming.
+  - Built on native ESP-IDF `esp_http_server` running on Core 0 at priority 1 (below TinyUSB audio task priority 5) to minimize thread contention with isochronous audio streaming.
   - Local responsive web dashboard at `http://<device-ip>:80` displaying live armed state, FSM state, stop reason, wait countdown, cast/bite/reel counters, USB audio RMS, and bag-full metrics.
   - Deliberate control buttons: **[ DELIBERATE ARM ]**, **[ START FISHING ]**, **[ EMERGENCY STOP ]**, and **[ RESET BAG-FULL ]**.
   - **Editable Wi-Fi Settings & Setup AP Recovery**:
@@ -29,6 +50,14 @@ PAXG-ticker is an ESP32-S3 firmware project for the LILYGO T-Display S3. The dev
     - **Setup AP Security Lockout**: Setup AP serves settings at `http://192.168.4.1/wifi` but cannot issue HID commands (`/api/start` and `/api/arm` return 403 Forbidden).
     - **Dedicated NVS Storage**: Successful new STA connection with DHCP is saved to dedicated NVS namespace `paxg_wifi`; last working config is preserved on failure/reboot and restored on timeout; Setup AP remains reachable during connection attempts; `.env` is never mutated and passwords are never logged.
   - **Network Safety Invariant**: Web callbacks cannot bypass USB or audio safety guards. `/api/start` delegates strictly to `LiveFishingController::requestStart()`, rejecting start if disarmed, unmounted, audio stale, or bag-full latched.
+- **Dedicated Port 8080 OTA Management**:
+  - Built on native ESP-IDF `esp_http_server` listening on wildcard socket, with request handlers strictly restricted to requests on private STA interface / local IP.
+  - Root `/` serves an embedded public static dashboard shell without exposing live telemetry unauthenticated.
+  - REST API endpoints (`/api/version`, `/api/health`, `/api/logs`, `/api/update`, `/api/reboot`, `/api/rollback`) strictly protected by independent 256-bit Bearer Token.
+  - Dual-slot partition layout (`app0` / `app1`) with ESP-IDF Bootloader automatic rollback protection.
+- **釣魚音訊判定**：從拋竿按鍵送出起忽略 2.2 秒的咬鉤訊號，之後音量須連續 32 ms 超過門檻才會收竿。USB 音訊串流切換時會暫停送出新按鍵、丟棄尚未送出的收竿指令，待音訊恢復且串流穩定 250 ms 後才繼續。音訊恢復逾時、USB 拔除或佇列溢位仍會停止。
+- **MacroDroid Webhook 停止通知**: 於根目錄 `.env` 設定 `MACRODROID_WEBHOOK_URL`（未設定則休眠）。僅在實際活躍釣魚會話因背包滿（`BAG_FULL`）停止並回到 Idle 時，透過 FreeRTOS 計數任務通知喚醒低優先級背景 Worker 執行單次 HTTPS GET（5 秒逾時、不重試、停用重定向、附加 CRT bundle、不記錄 URL，僅 2xx 視為成功）。手動停止、故障、閒置時偵測或正常收拋竿均不觸發。
+
 - **Safe Boot Default**:
   - Boots strictly into `DISARMED` and `IDLE`.
   - Operates with `WiFi.persistent(false)`, preserving user Wi-Fi credentials in Flash NVS without automatic overwrites.
@@ -38,10 +67,12 @@ PAXG-ticker is an ESP32-S3 firmware project for the LILYGO T-Display S3. The dev
 1. **Original Multi-Mode Firmware** (`src/`, build target `lilygo-t-display-s3` in [platformio.ini](platformio.ini)):
    - Framework: Arduino-ESP32 2.0.14
    - Features: Interactive Wi-Fi AP selector, 4x10 on-screen virtual keyboard password input, clock, weather, and synthetic fishing simulation.
+   - Workflow: Retains standard USB flash workflow unchanged.
 2. **Integrated Target Firmware** ([`test/arduino_idf_integration_poc`](test/arduino_idf_integration_poc), build target `esp32s3_arduino_idf_poc`):
-   - Framework: ESP-IDF 5.1.2 with Arduino-ESP32 3.0.7 as component
-   - Features: Dedicated Real Fishing screen with device IP display, LAN status & control Web UI, evidence-based bag-full stop, and real USB UAC 2.0 / HID keyboard composite.
-   - Startup: Uses `.env` compile-time definitions (`WIFI_SSID`, `WIFI_PASSWORD`) with `WiFi.persistent(false)`. Market screen removed from user-facing UI; linker symbols retained.
+   - Framework: ESP-IDF 5.1.2 with Arduino-ESP32 3.0.7 as component (16MB Flash, 8MB OPI PSRAM)
+   - Features: Dedicated Real Fishing screen with device IP display, LAN status & control Web UI (Port 80), evidence-based bag-full stop, real USB UAC 2.0 / HID keyboard composite, and dedicated Port 8080 OTA management with dual-slot rollback.
+   - Startup: Uses `.env` compile-time definitions (`WIFI_SSID`, `WIFI_PASSWORD`) with `WiFi.persistent(false)`. Market screen accessible via button navigation.
+   - OTA Reference: See [docs/OTA.md](docs/OTA.md) for complete initial USB flashing and wireless deployment instructions.
 
 ## Market Data Source
 
@@ -86,7 +117,7 @@ Tip: Click any image to open the full-size version.
 - [include/modules/audio](include/modules/audio): audio headers (`audio_detector.h`, `audio_ring_buffer.h`)
 - [include/modules/modes](include/modules/modes): canonical mode headers
 - [include/images](include/images): embedded graphics assets (badges, flags, arrows)
-- [docs](docs): architectural and feasibility documentation ([docs/usb_feasibility.md](docs/usb_feasibility.md))
+- [docs](docs): architectural and feasibility documentation ([docs/usb_feasibility.md](docs/usb_feasibility.md), [docs/OTA.md](docs/OTA.md))
 - [platformio.ini](platformio.ini): root PlatformIO configuration
 
 ## Button Controls & Safe Navigation
@@ -100,6 +131,7 @@ The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):
 | **Any Press DOWN** | Real Fishing Screen (when ARMED or RUNNING) | **STOP Fishing** (highest priority: stops FSM, releases keys, DISARMS) |
 | **Short Press DOWN (< 800ms)** | Real Fishing Screen (when DISARMED & IDLE) | **Switch to PAXG Market Screen** (auto-disarms and releases keys) |
 | **Hold Both Buttons (>= 1000ms)** | Real Fishing Screen (any state) | **Toggle ARMED / DISARMED** (requires mounted USB host) |
+| **Hold UP 3 Seconds (>= 3000ms)** | PAXG Market Screen | **Display OTA Token & Device ID** (intended operation: 64-character hex token in 4 rows, 12-hex STA MAC Device ID, time-limited overlay; physical verification pending) |
 
 ### Debounce, Safety, and Release Behavior
 - **Debounce**: 50ms contact debounce filter applied to both button inputs to eliminate contact chatter. Pulses < 50ms are discarded.
@@ -130,7 +162,7 @@ pio run -d test/arduino_idf_integration_poc -e esp32s3_arduino_idf_poc
   - **Full-Bag Chime Detection & State Gating**: User-confirmed designated bell signal (3.0s interval $\pm 350\text{ms}$, RMS $\ge 3000.0f$, 4.1 kHz chime harmonic). Verified periodic pulses latch confirmed `StopReason::BagFull`, halting the controller, disarming, and locking state until explicitly reset via `/api/bagfull/reset`. Isolated acoustic pulses (such as bite splashes) do not falsely equate to confirmed full and allow normal fishing and reel progression.
   - **Bounded Thread-Safe Command Routing**: HTTP server task never accesses `LiveFishingController` directly. Web requests enter a bounded command queue; emergency Stop has priority over Start and purges queued casts; controller owner loop executes commands and synchronizes actual outcomes via condition variables.
   - **Synchronized Status Snapshot**: Owner loop periodically publishes complete telemetry snapshots under mutex protection, allowing lock-free reads by `/api/status` without thread contention or audio starvation.
-  - **LAN Web Dashboard & Wi-Fi Settings**: Clean responsive web dashboard served on Core 0 priority 1 (well below TinyUSB priority 5), rendering real-time FSM state, stop reasons, countdown, audio RMS, deliberate start/stop controls, and dedicated `/wifi` settings page.
+  - **LAN Web Dashboard & Wi-Fi Settings**: Clean responsive web dashboard served on Core 0 priority 1, rendering real-time FSM state, stop reasons, countdown, audio RMS, deliberate start/stop controls, and dedicated `/wifi` settings page.
   - **25/25 ELF Symbols Verified**: Includes `paxg::wifi::getWifiSettingsManager`, `paxg::wifi::WifiSettingsManager::update`, `BagFullDetector::processRms`, `startFishingWebServer`, `processPendingCommands`, `parseBinanceTicker`, `getMarketQuoteSnapshot`, `usb_composite_init`, and all driver symbols.
   - **Partition Table Parity**: Byte-identical to production 16MB layout (SHA-256 `bd0f7954aca2ef7d925ee21aaa1f3dc8822d1d6ce5cbbd26a135e5886bfff6ce`).
 
@@ -193,6 +225,15 @@ python test/arduino_idf_integration_poc/run_validation.py
 # Build target firmware (ESP-IDF 5.x + Arduino + UAC 2.0 + HID + PAXG Market)
 pio run -d test/arduino_idf_integration_poc -e esp32s3_arduino_idf_poc
 ```
+
+### Initial USB Upload & Subsequent OTA
+
+- **Initial USB Flash**: The first upgrade to the integrated target firmware MUST be a full USB upload (bootloader, partition table, `app0`, and reinitializing `otadata` to prevent old `app1` states from persisting). The PlatformIO 6.5.0 ESP-IDF builder automatically generates `ota_data_initial.bin` and writes it to `0xe000`. Do **not** use `erase_flash` in order to preserve existing NVS credentials.
+  ```powershell
+  # Full USB upload command (after user permission)
+  pio run -d test/arduino_idf_integration_poc -e esp32s3_arduino_idf_poc -t upload --upload-port COMx
+  ```
+- **Subsequent OTA Updates**: Future updates can be deployed wirelessly over Port 8080 using `scripts/deploy_ota.py`. See [docs/OTA.md](docs/OTA.md) for full details.
 
 ## Configuration via .env
 

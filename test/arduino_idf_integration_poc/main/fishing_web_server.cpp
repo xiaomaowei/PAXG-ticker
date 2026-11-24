@@ -44,6 +44,7 @@ struct CommandQueueState {
     size_t head = 0;
     size_t tail = 0;
     size_t count = 0;
+    bool maintenanceActive = false;
 
     uint32_t nextCommandId = 1;
 
@@ -53,6 +54,13 @@ struct CommandQueueState {
 };
 
 static CommandQueueState s_cmdQueue;
+
+#if defined(ARDUINO) || defined(ESP_PLATFORM)
+static bool isMaintenanceActive() {
+    std::lock_guard<std::mutex> lock(s_cmdQueue.mutex);
+    return s_cmdQueue.maintenanceActive;
+}
+#endif
 
 // ----------------------------------------------------------------------------
 // Synchronized Status Snapshot
@@ -175,6 +183,9 @@ static const char INDEX_HTML[] =
 // ----------------------------------------------------------------------------
 bool enqueueCommand(CommandType type, uint32_t* outCmdId) {
     std::lock_guard<std::mutex> lock(s_cmdQueue.mutex);
+    if (s_cmdQueue.maintenanceActive && type != CommandType::Stop) {
+        return false;
+    }
     uint32_t cmdId = s_cmdQueue.nextCommandId++;
     if (cmdId == 0) cmdId = s_cmdQueue.nextCommandId++;
     if (outCmdId) *outCmdId = cmdId;
@@ -292,6 +303,34 @@ void processPendingCommands(paxg::fishing::LiveFishingController* controller,
         CommandOutcome outcome;
         outcome.executed = true;
 
+        // If OTA maintenance is active, safely reject and drain start/arm commands
+        if (s_cmdQueue.maintenanceActive) {
+            if (cmd.type == CommandType::Start) {
+                outcome.success = false;
+                outcome.state = controller->getState();
+                outcome.stopReason = controller->getLastStopReason();
+                outcome.armed = controller->isArmed();
+                std::strncpy(outcome.reason, "OTA_MAINTENANCE", sizeof(outcome.reason));
+                s_cmdQueue.completedCommandId = cmd.id;
+                s_cmdQueue.lastOutcome = outcome;
+                lock.unlock();
+                s_cmdQueue.cvResult.notify_all();
+                return;
+            } else if (cmd.type == CommandType::ArmToggle) {
+                controller->disarm();
+                outcome.success = false;
+                outcome.armed = false;
+                outcome.state = controller->getState();
+                outcome.stopReason = controller->getLastStopReason();
+                std::strncpy(outcome.reason, "OTA_MAINTENANCE", sizeof(outcome.reason));
+                s_cmdQueue.completedCommandId = cmd.id;
+                s_cmdQueue.lastOutcome = outcome;
+                lock.unlock();
+                s_cmdQueue.cvResult.notify_all();
+                return;
+            }
+        }
+
         switch (cmd.type) {
             case CommandType::Start: {
                 bool ok = controller->requestStart();
@@ -343,6 +382,20 @@ void processPendingCommands(paxg::fishing::LiveFishingController* controller,
         lock.unlock();
         s_cmdQueue.cvResult.notify_all();
     }
+}
+
+void setMaintenanceActive(bool active) {
+    {
+        std::lock_guard<std::mutex> lock(s_cmdQueue.mutex);
+        s_cmdQueue.maintenanceActive = active;
+        s_cmdQueue.head = 0;
+        s_cmdQueue.tail = 0;
+        s_cmdQueue.count = 0;
+        s_cmdQueue.priorityStop = {};
+        s_cmdQueue.completedCommandId = 0;
+        s_cmdQueue.lastOutcome = {};
+    }
+    s_cmdQueue.cvResult.notify_all();
 }
 
 // ----------------------------------------------------------------------------
@@ -575,12 +628,26 @@ static esp_err_t post_wifi_apply_handler(httpd_req_t *req) {
         return httpd_resp_send(req, "{\"success\":false,\"reason\":\"INVALID_PIN\"}", HTTPD_RESP_USE_STRLEN);
     }
 
+    // Prevent Wi-Fi credential switching while OTA write is in progress
+    if (isMaintenanceActive()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"reason\":\"BLOCKED_DURING_OTA_WRITE\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
     // Only apply when stop confirmed by owner with no intervening start
     CommandOutcome stopOutcome = submitCommandSync(CommandType::Stop, 500);
     if (!stopOutcome.success || stopOutcome.armed || stopOutcome.state != paxg::fishing::FishingState::Idle) {
         httpd_resp_set_status(req, "500 Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, "{\"success\":false,\"reason\":\"STOP_FAILED\"}", HTTPD_RESP_USE_STRLEN);
+    }
+
+    // OTA may have started while the stop command was waiting in the owner queue.
+    if (isMaintenanceActive()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_send(req, "{\"success\":false,\"reason\":\"BLOCKED_DURING_OTA\"}", HTTPD_RESP_USE_STRLEN);
     }
 
     // Stage validated pending apply for owner loop
@@ -605,10 +672,10 @@ static esp_err_t get_status_handler(httpd_req_t *req) {
 }
 
 static esp_err_t post_start_handler(httpd_req_t *req) {
-    if (isRequestFromSetupAp(req) || paxg::wifi::isSetupOrApplyActive()) {
+    if (isRequestFromSetupAp(req) || paxg::wifi::isSetupOrApplyActive() || isMaintenanceActive()) {
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, "{\"success\":false,\"reason\":\"BLOCKED_DURING_SETUP_OR_APPLY\"}", HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, "{\"success\":false,\"reason\":\"BLOCKED_DURING_SETUP_APPLY_OR_OTA\"}", HTTPD_RESP_USE_STRLEN);
     }
 
     CommandOutcome outcome = submitCommandSync(CommandType::Start, 300);
@@ -642,10 +709,10 @@ static esp_err_t post_stop_handler(httpd_req_t *req) {
 }
 
 static esp_err_t post_arm_handler(httpd_req_t *req) {
-    if (isRequestFromSetupAp(req) || paxg::wifi::isSetupOrApplyActive()) {
+    if (isRequestFromSetupAp(req) || paxg::wifi::isSetupOrApplyActive() || isMaintenanceActive()) {
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, "{\"success\":false,\"reason\":\"BLOCKED_DURING_SETUP_OR_APPLY\"}", HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, "{\"success\":false,\"reason\":\"BLOCKED_DURING_SETUP_APPLY_OR_OTA\"}", HTTPD_RESP_USE_STRLEN);
     }
 
     CommandOutcome outcome = submitCommandSync(CommandType::ArmToggle, 300);

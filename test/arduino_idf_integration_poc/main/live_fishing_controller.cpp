@@ -30,7 +30,7 @@ void LiveFishingController::init() {
     lastPacketArrivalMs_ = 0;
     lastPacketsReceived_ = audioStream_ ? audioStream_->getPacketsReceived() : 0;
     armPacketsBaseline_ = 0;
-    initialDiscontinuities_ = audioStream_ ? audioStream_->getDiscontinuities() : 0;
+    recoveringAudio_ = false;
     initialQueueDrops_ = audioStream_ ? audioStream_->getQueueDrops() : 0;
     if (audioStream_) {
         audioStream_->clearTrigger();
@@ -76,6 +76,14 @@ void LiveFishingController::update(bool btnUpPressed, bool btnDownPressed) {
 
     // 2. Continuous fail-closed safety monitoring (including disconnect while Idle)
     checkSafetyGuards(now);
+
+    if (recoveringAudio_) {
+        // Keep releasing already held keys while audio recovers.
+        if (keyState_ != KeyState::PendingPress) {
+            updateKeypress(now);
+        }
+        return;
+    }
 
     // 3. Process active non-blocking keypress release and retries
     updateKeypress(now);
@@ -216,7 +224,7 @@ bool LiveFishingController::requestStart() {
     }
 
     // Capture baseline metrics at start of active session
-    initialDiscontinuities_ = audioStream_->getDiscontinuities();
+    lastDiscontinuities_ = audioStream_->getDiscontinuities();
     initialQueueDrops_ = audioStream_->getQueueDrops();
 
     // Start fishing sequence
@@ -237,9 +245,12 @@ bool LiveFishingController::requestStart() {
 }
 
 void LiveFishingController::requestStop(StopReason reason) {
-    armed_ = false; // Stop, dropout, disconnect, or error always disarms for safety
+    const bool wasActive = (fsm_.getState() != FishingState::Idle);
 
-    if (fsm_.getState() != FishingState::Idle) {
+    armed_ = false; // Stop, dropout, disconnect, or error always disarms for safety
+    recoveringAudio_ = false;
+
+    if (wasActive) {
         fsm_.handleEvent(FishingEvent::Stop);
     }
     fsm_.reset(FishingState::Idle);
@@ -269,6 +280,10 @@ void LiveFishingController::requestStop(StopReason reason) {
     }
 
     lastStopReason_ = reason;
+
+    if (wasActive && reason == StopReason::BagFull && bagFullStopCallback_) {
+        bagFullStopCallback_();
+    }
 }
 
 void LiveFishingController::checkSafetyGuards(uint32_t now) {
@@ -306,17 +321,39 @@ void LiveFishingController::checkSafetyGuards(uint32_t now) {
             return;
         }
 
-        // 3. Fail closed on stream discontinuity or queue overflow drop
-        if (audioStream_->getDiscontinuities() > initialDiscontinuities_) {
-            requestStop(StopReason::StreamDiscontinuity);
-            armed_ = false;
+        // Queue overflow discards audio, so keep the existing fail-closed behavior.
+        if (audioStream_->getQueueDrops() > initialQueueDrops_) {
+            requestStop(StopReason::QueueOverflowDrop);
             return;
         }
 
-        if (audioStream_->getQueueDrops() > initialQueueDrops_) {
-            requestStop(StopReason::QueueOverflowDrop);
-            armed_ = false;
-            return;
+        const uint64_t discontinuities = audioStream_->getDiscontinuities();
+        if (discontinuities != lastDiscontinuities_) {
+            lastDiscontinuities_ = discontinuities;
+            if (!recoveringAudio_) {
+                recoveryStartedMs_ = now;
+                recoveringAudio_ = true;
+            }
+            lastStreamChangeMs_ = now;
+            packetsAtStreamChange_ = lastPacketsReceived_;
+
+            const auto state = fsm_.getState();
+            if (state == FishingState::BiteDetected ||
+                (state == FishingState::Reeling && keyState_ == KeyState::PendingPress)) {
+                keyState_ = KeyState::Idle;
+                activeKeycode_ = 0;
+                fsm_.reset(FishingState::Waiting);
+            }
+        }
+
+        if (recoveringAudio_) {
+            if (now - recoveryStartedMs_ >= STREAM_TIMEOUT_MS) {
+                requestStop(StopReason::StreamDiscontinuity);
+            } else if (now - lastStreamChangeMs_ >= STREAM_SETTLE_MS &&
+                       lastPacketsReceived_ > packetsAtStreamChange_) {
+                audioStream_->clearTrigger();
+                recoveringAudio_ = false;
+            }
         }
     }
 }
@@ -429,7 +466,7 @@ void LiveFishingController::processFsm(uint32_t now) {
     switch (fsm_.getState()) {
         case FishingState::Casting:
             // Cast presentation wait; key must be completely released
-            if ((now - stateStartTime_ >= CASTING_DURATION_MS) && (keyState_ == KeyState::Idle)) {
+            if (keyState_ == KeyState::Idle && now - castAcceptedTime_ >= CASTING_DURATION_MS) {
                 if (audioStream_) {
                     audioStream_->clearTrigger(); // Purge any casting acoustic transients
                 }
@@ -561,16 +598,6 @@ void LiveFishingController::processFsm(uint32_t now) {
                     lastPacketArrivalMs_ != 0 &&
                     ((now - lastPacketArrivalMs_) <= STREAM_TIMEOUT_MS)) {
                     if (audioStream_) {
-                        if (audioStream_->getDiscontinuities() > initialDiscontinuities_) {
-                            requestStop(StopReason::StreamDiscontinuity);
-                            armed_ = false;
-                            return;
-                        }
-                        if (audioStream_->getQueueDrops() > initialQueueDrops_) {
-                            requestStop(StopReason::QueueOverflowDrop);
-                            armed_ = false;
-                            return;
-                        }
                         audioStream_->clearTrigger(); // Purge any transient audio triggers before recast
                     }
                     if (fsm_.handleEvent(FishingEvent::CooldownComplete)) {

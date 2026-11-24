@@ -6,8 +6,11 @@ idf_component_register(
         "bag_full_detector.cpp"
         "fishing_web_server.cpp"
         "fishing_wifi_settings.cpp"
+        "fishing_stop_notification.cpp"
         "mode_navigator.cpp"
         "paxg_async_quote.cpp"
+        "ota_runtime.cpp"
+        "ota_server.cpp"
         "${CMAKE_CURRENT_LIST_DIR}/../../../src/audio/pcm_audio_detector.cpp"
     INCLUDE_DIRS
         "."
@@ -17,5 +20,11 @@ idf_component_register(
         TFT_eSPI
         usb_device_composite
         esp_http_server
+        esp_http_client
         nvs_flash
+        app_update
+        bootloader_support
+        mbedtls
+        esp_netif
+        esp_timer
 )

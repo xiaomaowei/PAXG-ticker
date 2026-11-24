@@ -285,3 +285,7 @@ pyrightconfig.json
 # Stray build folders (seen under vendored libs)
 **/build/
 **/.cmake/
+
+# Local private OTA deploy configuration
+ota-deploy.local.ini
+ota-deploy*.local.ini

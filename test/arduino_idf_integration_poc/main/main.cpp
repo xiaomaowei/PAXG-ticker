@@ -1,6 +1,14 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <TFT_eSPI.h>
+#include <atomic>
+#include <mutex>
+#include <esp_heap_caps.h>
+#include <esp_mac.h>
+#include <esp_netif.h>
+#include <esp_ota_ops.h>
+#include <esp_system.h>
+#include <esp_timer.h>
 
 #include "usb_audio_queue.h"
 #include "usb_device_composite.h"
@@ -11,6 +19,11 @@
 #include "fishing_wifi_settings.h"
 #include "paxg_async_quote.h"
 #include "mode_navigator.h"
+#include "ota_runtime.h"
+#include "ota_server.h"
+#include "fishing_stop_notification.h"
+
+extern "C" bool tud_mounted(void);
 
 // Production TFT_eSPI display and double-buffered full-screen sprite
 TFT_eSPI tft = TFT_eSPI();
@@ -25,22 +38,28 @@ void (* volatile g_wifi_anchor_ref)() = &dummy_wifi_symbol_retention_anchor;
 
 // Bounded allocation-free UAC PCM bridge feeding production PcmAudioDetector
 static paxg::uac::UacAudioBridge g_uac_audio_bridge;
+static std::atomic<bool> s_otaAudioPaused{false};
 
 // Evidence-calibrated full-bag addon bell detector (3000ms +/- 350ms period, threshold > 3000)
 static paxg::audio::BagFullDetector g_bag_full_detector;
+static std::atomic<uint32_t> s_audioStreamChanges{0};
 
 // Audio output callback invoked from speaker FreeRTOS task (usb_spk_task)
 static esp_err_t test_audio_output_cb(uint8_t *buf, size_t len, void *arg) {
     (void)arg;
-    g_uac_audio_bridge.consumeUacChunk(buf, len);
+    if (!s_otaAudioPaused.load(std::memory_order_acquire)) {
+        g_uac_audio_bridge.consumeUacChunk(buf, len);
+    }
     return ESP_OK;
 }
 
 // Audio discontinuity callback invoked from consumer task (usb_spk_task)
 static void test_audio_discontinuity_cb(uint32_t reason, void *arg) {
-    (void)reason;
     (void)arg;
     g_uac_audio_bridge.resetResidualOnStreamBreak();
+    if (reason == UAC_DISCONTINUITY_REASON_STREAM_CHANGE) {
+        s_audioStreamChanges.fetch_add(1, std::memory_order_release);
+    }
 }
 
 // Audio mute callback strictly on host mute-control requests
@@ -83,9 +102,7 @@ public:
         return bridge_ ? bridge_->getMetricsSnapshot().packetsReceived : 0;
     }
     uint64_t getDiscontinuities() const override {
-        if (!bridge_) return 0;
-        const auto snap = bridge_->getMetricsSnapshot();
-        return snap.streamDiscontinuityCount + snap.residualDiscontinuityCount;
+        return s_audioStreamChanges.load(std::memory_order_acquire);
     }
     uint32_t getQueueDrops() const override {
         usb_composite_audio_stats_t stats{};
@@ -131,21 +148,423 @@ void manual_trigger_keystroke_demo(uint8_t modifier, uint8_t keycode) {
 }
 void (* volatile g_hid_demo_ref)(uint8_t, uint8_t) = &manual_trigger_keystroke_demo;
 
-// Retain linker symbols for PAXG and mode navigator
-void dummy_paxg_symbol_retention_anchor() {
-    paxg::market::getMarketQuoteSnapshot(0);
-    paxg::market::startPaxgQuoteWorker();
-    double p = 0, c = 0;
-    paxg::market::parseBinanceTicker(nullptr, p, c);
-    paxg::market::evaluateMarketSessions(0, 0, 0, false);
-    paxg::ui::ModeNavigator nav;
-    nav.update(false, false, 0, g_fishing_controller);
+// Production ModeNavigator coordinating PAXG Market and Real Fishing screens
+static paxg::ui::ModeNavigator s_modeNavigator(paxg::ui::ScreenMode::PaxgMarket);
+
+static std::mutex s_otaHealthMutex;
+static paxg::ota::HealthSnapshot s_otaHealthSnapshot{};
+static std::atomic<bool> s_otaInitialized{false};
+static std::atomic<bool> s_otaHold{false};
+static bool s_webServerStarted = false;
+static bool s_usbInitSucceeded = false;
+static bool s_displayReady = false;
+static bool s_quoteWorkerStarted = false;
+static uint32_t s_ownerLoopCount = 0;
+static uint32_t s_ownerLoopLastMs = 0;
+static std::atomic<uint32_t> s_otaFailureShownAt{0};
+static std::atomic<bool> s_otaFailureTimerStarted{false};
+static bool s_navigationReleaseRequired = false;
+static bool s_credentialsVisible = false;
+static bool s_credentialsRedrawNeeded = false;
+static uint32_t s_credentialsShownAt = 0;
+static uint32_t s_upHoldStartedAt = 0;
+static bool s_upHoldTiming = false;
+static bool s_upRevealConsumed = false;
+static bool s_prevRawUp = false;
+static bool s_prevRawDown = false;
+static uint32_t s_pendingValidationStartedAt = 0;
+static uint32_t s_healthySince = 0;
+static bool s_rollbackAttempted = false;
+static esp_timer_handle_t s_rollbackWatchdog = nullptr;
+
+static void pendingValidationWatchdog(void*) {
+    // Give the rollback-enabled bootloader one reboot opportunity if the owner loop stalls.
+    esp_restart();
 }
-void (* volatile g_paxg_anchor_ref)() = &dummy_paxg_symbol_retention_anchor;
+
+static void startPendingValidationWatchdog() {
+    if (!paxg::ota::pendingValidation() || s_rollbackWatchdog) return;
+    const esp_timer_create_args_t args = {
+        .callback = pendingValidationWatchdog,
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "ota_validate_guard",
+        .skip_unhandled_events = true
+    };
+    if (esp_timer_create(&args, &s_rollbackWatchdog) == ESP_OK) {
+        esp_timer_start_once(s_rollbackWatchdog, 120000000);
+    }
+}
+
+static void stopPendingValidationWatchdog() {
+    if (s_rollbackWatchdog) esp_timer_stop(s_rollbackWatchdog);
+}
+
+static bool otaMaintenanceBegin(uint32_t timeoutMs) {
+    auto& runtime = paxg::ota::getOtaRuntime();
+    if (!s_otaInitialized) return false;
+    s_otaHold = true;
+    paxg::web::setMaintenanceActive(true);
+    if (paxg::wifi::getWifiSettingsManager().isSetupOrApplyActive() ||
+        !runtime.requestMaintenance("HTTP_OTA_REQUEST")) {
+        s_otaHold = false;
+        paxg::web::setMaintenanceActive(false);
+        s_navigationReleaseRequired = true;
+        return false;
+    }
+    paxg::market::setPaxgQuotePaused(true);
+    s_otaAudioPaused.store(true, std::memory_order_release);
+
+    const uint32_t started = millis();
+    while (static_cast<uint32_t>(millis() - started) < timeoutMs) {
+        const auto state = runtime.getState();
+        if (state == paxg::ota::OtaState::MaintenanceActive) return true;
+        if (state == paxg::ota::OtaState::Failed || state == paxg::ota::OtaState::Idle) break;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    runtime.cancelMaintenanceRequest();
+    s_otaHold = false;
+    paxg::web::setMaintenanceActive(false);
+    paxg::market::setPaxgQuotePaused(false);
+    s_otaAudioPaused.store(false, std::memory_order_release);
+    g_uac_audio_bridge.resetResidualOnStreamBreak();
+    s_navigationReleaseRequired = true;
+    return false;
+}
+
+static void otaMaintenanceLeave(bool success) {
+    paxg::ota::getOtaRuntime().leaveMaintenance(success, millis());
+    if (!success) {
+        s_otaFailureShownAt = millis();
+        s_otaFailureTimerStarted = true;
+    }
+}
+
+static void otaProgress(size_t written, size_t total) {
+    paxg::ota::getOtaRuntime().updateProgress(written, total, millis());
+}
+
+static void otaRequestRestart() {
+    paxg::ota::getOtaRuntime().requestRestart(millis());
+}
+
+static void otaHealthSnapshot(paxg::ota::HealthSnapshot* out) {
+    if (!out) return;
+    std::lock_guard<std::mutex> lock(s_otaHealthMutex);
+    *out = s_otaHealthSnapshot;
+}
+
+static void updateOtaHealthSnapshot(uint32_t now, bool ownerLoopResponsive) {
+    paxg::ota::HealthSnapshot snapshot{};
+    const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+    snapshot.healthy = s_usbInitSucceeded && s_displayReady && s_quoteWorkerStarted &&
+                       s_ownerLoopCount > 10 && ownerLoopResponsive && wifiConnected &&
+                       paxg::ota::isRunning();
+    snapshot.uptimeSec = now / 1000;
+    snapshot.freeHeap = esp_get_free_heap_size();
+    snapshot.minFreeHeap = esp_get_minimum_free_heap_size();
+    snapshot.totalPsram = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    snapshot.freePsram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    snapshot.usbMounted = usb_composite_is_mounted();
+    snapshot.usbHidReady = usb_composite_hid_ready();
+    usb_composite_audio_stats_t audioStats{};
+    static uint32_t lastPacketCount = 0;
+    static uint32_t lastPacketAt = 0;
+    if (usb_composite_get_audio_stats(&audioStats) == ESP_OK &&
+        audioStats.packets_delivered != lastPacketCount) {
+        lastPacketCount = audioStats.packets_delivered;
+        lastPacketAt = now;
+    }
+    snapshot.usbAudioStreaming = snapshot.usbMounted && lastPacketAt != 0 &&
+                                 static_cast<uint32_t>(now - lastPacketAt) < 5000;
+    if (wifiConnected) {
+        snapshot.rssi = static_cast<int8_t>(WiFi.RSSI());
+        const String ip = WiFi.localIP().toString();
+        std::snprintf(snapshot.localIp, sizeof(snapshot.localIp), "%s", ip.c_str());
+    }
+    std::snprintf(snapshot.wifiMode, sizeof(snapshot.wifiMode), "%s",
+                  (WiFi.getMode() & WIFI_AP) ? ((WiFi.getMode() & WIFI_STA) ? "APSTA" : "AP") : "STA");
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    if (running) std::snprintf(snapshot.activeSlot, sizeof(snapshot.activeSlot), "%.7s", running->label);
+    std::snprintf(snapshot.bootStateTxt, sizeof(snapshot.bootStateTxt), "%s",
+                  paxg::ota::pendingValidation() ? "pending_validation" : "valid");
+    std::snprintf(snapshot.operatingMode, sizeof(snapshot.operatingMode), "%s",
+                  s_modeNavigator.getMode() == paxg::ui::ScreenMode::PaxgMarket ? "paxg" : "fishing");
+    {
+        std::lock_guard<std::mutex> lock(s_otaHealthMutex);
+        s_otaHealthSnapshot = snapshot;
+    }
+}
+
+static void initOtaOnceRadioIsActive() {
+    if (!s_otaInitialized) {
+        const paxg::ota::RuntimeHooks hooks{
+            otaMaintenanceBegin, otaMaintenanceLeave, otaProgress, otaRequestRestart, otaHealthSnapshot
+        };
+        if (paxg::ota::init(hooks) == ESP_OK) s_otaInitialized = true;
+    }
+    if (s_otaInitialized && WiFi.status() == WL_CONNECTED) {
+        esp_netif_t* sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (sta) paxg::ota::start(sta);
+    }
+}
 
 // Hardware button pins on LilyGo T-Display-S3 (active-low, internal pull-up)
 constexpr int PIN_BUTTON_UP = 14;
 constexpr int PIN_BUTTON_DOWN = 0;
+
+// ----------------------------------------------------------------------------
+// PAXG Market View Rendering (320x170 High-Contrast Layout with Local IP)
+// ----------------------------------------------------------------------------
+static void renderPaxgScreen(uint32_t now, bool forceRedraw = false) {
+    const auto quoteSnap = paxg::market::getMarketQuoteSnapshot(now);
+    const bool mounted = usb_composite_is_mounted();
+    const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+    const auto wifiStatus = paxg::wifi::getWifiSettingsManager().getStatus();
+
+    static double s_lastPrice = -1.0;
+    static paxg::market::QuoteStatus s_lastStatus = paxg::market::QuoteStatus::Unavailable;
+    static bool s_lastMounted = false;
+    static bool s_lastWifi = false;
+
+    const bool stateChanged = (quoteSnap.price != s_lastPrice) ||
+                              (quoteSnap.status != s_lastStatus) ||
+                              (mounted != s_lastMounted) ||
+                              (wifiConnected != s_lastWifi);
+
+    if (!forceRedraw && !stateChanged) {
+        return;
+    }
+    s_lastPrice = quoteSnap.price;
+    s_lastStatus = quoteSnap.status;
+    s_lastMounted = mounted;
+    s_lastWifi = wifiConnected;
+
+    if (s_fishingSprite.getPointer() != nullptr) {
+        s_fishingSprite.fillSprite(TFT_BLACK);
+
+        // Header (y=2..20)
+        s_fishingSprite.setTextColor(TFT_GOLD, TFT_BLACK);
+        s_fishingSprite.drawString("PAXG / USD", 10, 2, 4);
+
+        const uint16_t usbColor = mounted ? TFT_GREEN : TFT_RED;
+        s_fishingSprite.setTextColor(usbColor, TFT_BLACK);
+        s_fishingSprite.drawString(mounted ? "USB OK  " : "USB UNMT", 155, 4, 2);
+
+        const char* statusStr = paxg::market::getQuoteStatusName(quoteSnap.status);
+        const uint16_t statusColor = (quoteSnap.status == paxg::market::QuoteStatus::Fresh) ? TFT_GREEN
+                                   : (quoteSnap.status == paxg::market::QuoteStatus::Stale) ? TFT_YELLOW
+                                   : TFT_RED;
+        s_fishingSprite.setTextColor(statusColor, TFT_BLACK);
+        s_fishingSprite.drawString(statusStr, 245, 4, 2);
+
+        // Divider Line 1 (y=22)
+        s_fishingSprite.drawFastHLine(0, 22, 320, TFT_CYAN);
+
+        // Price Display (y=30, Font 6 / 4)
+        char priceBuf[32];
+        if (quoteSnap.status != paxg::market::QuoteStatus::Unavailable && quoteSnap.price > 0.0) {
+            snprintf(priceBuf, sizeof(priceBuf), "$%.2f", quoteSnap.price);
+        } else {
+            snprintf(priceBuf, sizeof(priceBuf), "$---.--");
+        }
+        s_fishingSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+        s_fishingSprite.drawString(priceBuf, 12, 30, 6);
+
+        // 24h Change Percent (y=40, font 4)
+        char changeBuf[32];
+        if (quoteSnap.status != paxg::market::QuoteStatus::Unavailable) {
+            snprintf(changeBuf, sizeof(changeBuf), "%+.2f%%", quoteSnap.percentChange);
+            const uint16_t changeColor = (quoteSnap.percentChange >= 0.0) ? TFT_GREEN : TFT_RED;
+            s_fishingSprite.setTextColor(changeColor, TFT_BLACK);
+        } else {
+            snprintf(changeBuf, sizeof(changeBuf), "--.---%%");
+            s_fishingSprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        }
+        s_fishingSprite.drawString(changeBuf, 210, 42, 4);
+
+        // Divider Line 2 (y=80)
+        s_fishingSprite.drawFastHLine(0, 80, 320, TFT_DARKGREY);
+
+        // Mini Price History Chart (x=12, y=85, w=120, h=28)
+        s_fishingSprite.drawRect(12, 85, 120, 28, TFT_NAVY);
+        if (quoteSnap.historyCount > 1) {
+            double minP = quoteSnap.priceHistory[0];
+            double maxP = quoteSnap.priceHistory[0];
+            for (size_t i = 1; i < quoteSnap.historyCount && i < paxg::market::MAX_PRICE_HISTORY; ++i) {
+                if (quoteSnap.priceHistory[i] < minP) minP = quoteSnap.priceHistory[i];
+                if (quoteSnap.priceHistory[i] > maxP) maxP = quoteSnap.priceHistory[i];
+            }
+            double range = maxP - minP;
+            if (range <= 0.001) range = 1.0;
+            const int step = 110 / (quoteSnap.historyCount - 1);
+            int prevX = 14;
+            int prevY = 110 - static_cast<int>((quoteSnap.priceHistory[0] - minP) / range * 22.0);
+            for (size_t i = 1; i < quoteSnap.historyCount && i < paxg::market::MAX_PRICE_HISTORY; ++i) {
+                int curX = 14 + i * step;
+                int curY = 110 - static_cast<int>((quoteSnap.priceHistory[i] - minP) / range * 22.0);
+                s_fishingSprite.drawLine(prevX, prevY, curX, curY, TFT_GOLD);
+                prevX = curX;
+                prevY = curY;
+            }
+        } else {
+            s_fishingSprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
+            s_fishingSprite.drawString("No History", 24, 92, 2);
+        }
+
+        // LAN IP Display & Setup AP / PIN (Right side, x=142, y=82)
+        const char* tftPin = paxg::wifi::getWifiSettingsManager().getTftPin();
+        if (wifiStatus.isSetupAp) {
+            const char* apPw = paxg::wifi::getWifiSettingsManager().getTftApPassword();
+            s_fishingSprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+            s_fishingSprite.drawString("AP: " + String(wifiStatus.apSsid), 142, 82, 2);
+            s_fishingSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+            s_fishingSprite.drawString("PW:" + String(apPw) + " PIN:" + String(tftPin), 142, 98, 2);
+        } else if (wifiConnected) {
+            String ipStr = WiFi.localIP().toString();
+            s_fishingSprite.setTextColor(TFT_GREEN, TFT_BLACK);
+            s_fishingSprite.drawString("IP: " + ipStr, 142, 82, 2);
+            s_fishingSprite.setTextColor(TFT_CYAN, TFT_BLACK);
+            s_fishingSprite.drawString("WEB:80 PIN:" + String(tftPin), 142, 98, 2);
+        } else if (WiFi.getMode() != WIFI_OFF) {
+            s_fishingSprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+            s_fishingSprite.drawString("WiFi: CONNECTING...", 142, 86, 2);
+        } else {
+            s_fishingSprite.setTextColor(TFT_DARKGREY, TFT_BLACK);
+            s_fishingSprite.drawString("WiFi: OFF", 142, 86, 2);
+        }
+
+        // Divider Line 3 (y=118)
+        s_fishingSprite.drawFastHLine(0, 118, 320, TFT_CYAN);
+
+        // Hardware & Memory Row (y=122..144)
+        const auto mem = paxg::ota::getOtaRuntime().getMemoryMetrics();
+        char memBuf[64];
+        snprintf(memBuf, sizeof(memBuf), "PSRAM:%s (%uKB free) | Heap:%uKB",
+                 mem.psramAvailable ? "8MB" : "NONE",
+                 static_cast<unsigned int>(mem.psramFree / 1024),
+                 static_cast<unsigned int>(mem.freeInternalHeap / 1024));
+        s_fishingSprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+        s_fishingSprite.drawString(memBuf, 10, 124, 2);
+
+        // Divider Line 4 (y=146)
+        s_fishingSprite.drawFastHLine(0, 146, 320, TFT_CYAN);
+
+        // Footer (y=150)
+        s_fishingSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+        s_fishingSprite.drawString("DOWN: FISHING MODE | OTA TARGET ARMED", 10, 150, 2);
+
+        // Push frame to ST7789
+        s_fishingSprite.pushSprite(0, 0);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// OTA Progress View Rendering (320x170 High-Contrast Layout)
+// ----------------------------------------------------------------------------
+static void renderOtaProgressScreen(uint32_t now) {
+    (void)now;
+    const auto prog = paxg::ota::getOtaRuntime().getProgress();
+
+    if (s_fishingSprite.getPointer() != nullptr) {
+        s_fishingSprite.fillSprite(TFT_BLACK);
+
+        // Header (y=2..20)
+        s_fishingSprite.setTextColor(TFT_CYAN, TFT_BLACK);
+        s_fishingSprite.drawString("FIRMWARE OTA", 10, 2, 4);
+
+        const char* stateName = paxg::ota::getOtaStateName(prog.state);
+        const uint16_t stateColor = (prog.state == paxg::ota::OtaState::Failed) ? TFT_RED
+                                  : (prog.state == paxg::ota::OtaState::PendingReboot) ? TFT_GREEN
+                                  : TFT_YELLOW;
+        s_fishingSprite.setTextColor(stateColor, TFT_BLACK);
+        s_fishingSprite.drawString(stateName, 175, 4, 2);
+
+        // Divider Line 1 (y=22)
+        s_fishingSprite.drawFastHLine(0, 22, 320, TFT_CYAN);
+
+        // Status or Error (y=32..55)
+        if (prog.state == paxg::ota::OtaState::Failed) {
+            s_fishingSprite.setTextColor(TFT_RED, TFT_BLACK);
+            s_fishingSprite.drawString("FAILED: " + String(prog.failureReason), 12, 32, 2);
+            s_fishingSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+            s_fishingSprite.drawString("REVERTED TO SAFE DISARMED MODE", 12, 50, 2);
+        } else {
+            s_fishingSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+            s_fishingSprite.drawString(prog.statusMessage[0] ? prog.statusMessage : "UPDATING FIRMWARE...", 12, 32, 4);
+        }
+
+        // Progress Bar (y=70..94, w=296, h=24)
+        s_fishingSprite.drawRect(12, 70, 296, 24, TFT_WHITE);
+        const uint16_t barWidth = static_cast<uint16_t>((292 * std::min<uint8_t>(100, prog.percent)) / 100);
+        if (barWidth > 0) {
+            const uint16_t barColor = (prog.state == paxg::ota::OtaState::Failed) ? TFT_RED : TFT_GREEN;
+            s_fishingSprite.fillRect(14, 72, barWidth, 20, barColor);
+        }
+
+        // Progress Byte Count (y=100..114)
+        char byteBuf[64];
+        if (prog.totalBytes > 0) {
+            snprintf(byteBuf, sizeof(byteBuf), "%u%% (%u KB / %u KB)",
+                     prog.percent,
+                     static_cast<unsigned int>(prog.bytesWritten / 1024),
+                     static_cast<unsigned int>(prog.totalBytes / 1024));
+        } else {
+            snprintf(byteBuf, sizeof(byteBuf), "%u%% (%u bytes written)",
+                     prog.percent,
+                     static_cast<unsigned int>(prog.bytesWritten));
+        }
+        s_fishingSprite.setTextColor(TFT_CYAN, TFT_BLACK);
+        s_fishingSprite.drawString(byteBuf, 14, 100, 2);
+
+        // Divider Line 2 (y=118)
+        s_fishingSprite.drawFastHLine(0, 118, 320, TFT_CYAN);
+
+        // Safety Status Row (y=124..144)
+        s_fishingSprite.fillRoundRect(12, 122, 110, 22, 4, TFT_RED);
+        s_fishingSprite.setTextColor(TFT_WHITE, TFT_RED);
+        s_fishingSprite.drawString("DISARMED", 20, 125, 2);
+
+        s_fishingSprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+        s_fishingSprite.drawString("USB LIVE | ANALYSIS PAUSED", 132, 125, 2);
+
+        // Divider Line 3 (y=146)
+        s_fishingSprite.drawFastHLine(0, 146, 320, TFT_CYAN);
+
+        // Footer (y=150)
+        s_fishingSprite.setTextColor(TFT_ORANGE, TFT_BLACK);
+        s_fishingSprite.drawString("DO NOT POWER OFF DEVICE DURING WRITE", 10, 150, 2);
+
+        // Push frame to ST7789
+        s_fishingSprite.pushSprite(0, 0);
+    }
+}
+
+static void renderOtaCredentialsScreen() {
+    const char* token = paxg::ota::getToken();
+    uint8_t mac[6] = {};
+    char deviceId[24] = "STA MAC: unavailable";
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        std::snprintf(deviceId, sizeof(deviceId), "STA MAC: %02X%02X%02X%02X%02X%02X",
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    }
+    if (!s_fishingSprite.getPointer()) return;
+    s_fishingSprite.fillSprite(TFT_BLACK);
+    s_fishingSprite.setTextColor(TFT_CYAN, TFT_BLACK);
+    s_fishingSprite.drawString("OTA TOKEN (LCD ONLY)", 8, 4, 2);
+    s_fishingSprite.setTextColor(TFT_WHITE, TFT_BLACK);
+    for (size_t row = 0; row < 4; ++row) {
+        char tokenLine[17] = {};
+        if (token) std::snprintf(tokenLine, sizeof(tokenLine), "%.16s", token + row * 16);
+        s_fishingSprite.drawString(tokenLine, 8, 26 + static_cast<int>(row) * 20, 2);
+    }
+    s_fishingSprite.setTextColor(TFT_YELLOW, TFT_BLACK);
+    s_fishingSprite.drawString(deviceId, 8, 112, 2);
+    s_fishingSprite.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    s_fishingSprite.drawString("AUTO HIDE 30s | PRESS BUTTON TO HIDE", 8, 142, 2);
+    s_fishingSprite.pushSprite(0, 0);
+}
 
 // ----------------------------------------------------------------------------
 // Real Fishing View Rendering (320x170 High-Contrast Layout with Local IP)
@@ -400,7 +819,7 @@ void setup() {
     paxg::audio::AudioDetectorConfig audioCfg;
     audioCfg.sampleRate = 48000;
     audioCfg.frameSize = 384;      // 8.0 ms frame duration at 48 kHz
-    audioCfg.debounceFrames = 2;   // 16.0 ms debounce verification
+    audioCfg.debounceFrames = 4;   // Require 32 ms above threshold for a bite
     audioCfg.cooldownFrames = 25;  // 200.0 ms lockout following trigger
     audioCfg.absoluteThreshold = 1500;
     audioCfg.thresholdRatio = 2.5f;
@@ -419,6 +838,8 @@ void setup() {
 
     // 3. Initialize live fishing controller (defaults to Disarmed & Idle)
     g_fishing_controller.init();
+    paxg::notification::initStopNotification();
+    g_fishing_controller.setBagFullStopCallback(paxg::notification::onActiveBagFullStop);
 
     // 4. TFT display initialization
     tft.begin();
@@ -427,6 +848,7 @@ void setup() {
 
     // 5. Initialize full-screen double-buffer sprite for Real Fishing mode (106KB in RAM)
     s_fishingSprite.createSprite(320, 170);
+    s_displayReady = s_fishingSprite.getPointer() != nullptr;
 
     // 6. Wi-Fi initialization with dedicated NVS & recovery manager
 #if defined(WIFI_SSID) && defined(WIFI_PASSWORD)
@@ -444,34 +866,128 @@ void setup() {
         .cb_ctx = NULL,
         .discontinuity_cb = test_audio_discontinuity_cb,
     };
-    usb_composite_init(&config);
+    s_usbInitSucceeded = usb_composite_init(&config) == ESP_OK;
+
+    // 8. Start PAXG market quote async background worker (Core 0, Priority 1)
+    paxg::market::startPaxgQuoteWorker();
+    s_quoteWorkerStarted = paxg::market::isPaxgQuoteWorkerRunning();
+    startPendingValidationWatchdog();
+
+    // 9. Instrument task initialization and memory metrics (internal SRAM + 8MB Octal PSRAM)
+    const auto mem = paxg::ota::getOtaRuntime().getMemoryMetrics();
+    Serial.printf("[INIT] Task initialization complete\n");
+    Serial.printf("[INIT] USB composite mounted=%d\n", usb_composite_is_mounted() ? 1 : 0);
+    Serial.printf("[INIT] PSRAM avail=%d total=%u free=%u | Heap free=%u minFree=%u\n",
+                  mem.psramAvailable ? 1 : 0,
+                  static_cast<unsigned int>(mem.psramTotal),
+                  static_cast<unsigned int>(mem.psramFree),
+                  static_cast<unsigned int>(mem.freeInternalHeap),
+                  static_cast<unsigned int>(mem.minFreeInternalHeap));
 }
 
 void loop() {
     const uint32_t now = millis();
 
-    // 0. Non-blocking Wi-Fi lifecycle & recovery state machine update
-    paxg::wifi::getWifiSettingsManager().update(now);
+    auto& wifiManager = paxg::wifi::getWifiSettingsManager();
+    auto& otaRuntime = paxg::ota::getOtaRuntime();
+    if (!s_otaHold) wifiManager.update(now);
 
-    // 1. Drain & process pending web commands in the controller owner loop
+    const bool wifiConnected = WiFi.status() == WL_CONNECTED;
+    if (wifiConnected) initOtaOnceRadioIsActive(); // Uses the actual WIFI_STA_DEF netif; no stop on link loss.
+
+    const bool ownerLoopResponsive = !s_ownerLoopLastMs ||
+                                     static_cast<uint32_t>(now - s_ownerLoopLastMs) < 1000;
+    ++s_ownerLoopCount;
+    const bool usbActuallyMounted = tud_mounted(); // Suspended remains mounted and must wait for HID readiness.
+    const bool wasFailure = otaRuntime.hasFailed();
+    otaRuntime.pollOwnerLoop(now, g_fishing_controller, s_composite_hid, usbActuallyMounted);
+    const bool nowFailed = otaRuntime.hasFailed();
+    if (nowFailed && !s_otaFailureTimerStarted) {
+        s_otaFailureShownAt = now;
+        s_otaFailureTimerStarted = true;
+    }
+    if (wasFailure && !nowFailed) s_otaFailureTimerStarted = false;
+
+    // A bounded error screen is shown before returning disarmed to the prior mode.
+    if (nowFailed && s_otaFailureTimerStarted && static_cast<uint32_t>(now - s_otaFailureShownAt) >= 5000) {
+        otaRuntime.exitMaintenance(now);
+        s_otaHold = false;
+        s_otaFailureTimerStarted = false;
+        paxg::web::setMaintenanceActive(false);
+        paxg::market::setPaxgQuotePaused(false);
+        s_otaAudioPaused.store(false, std::memory_order_release);
+        g_uac_audio_bridge.resetResidualOnStreamBreak();
+    }
+
+    // Drain only the emergency stop while maintenance is held; start/arm queues were purged.
     paxg::web::processPendingCommands(&g_fishing_controller, &g_bag_full_detector, now);
 
-    // 2. Ingest audio RMS into BagFullDetector
-    const auto audioSnap = g_uac_audio_bridge.getMetricsSnapshot();
-    g_bag_full_detector.processRms(now, audioSnap.detectorMetrics.rms);
+    if (!s_otaAudioPaused.load(std::memory_order_acquire)) {
+        const auto audioSnap = g_uac_audio_bridge.getMetricsSnapshot();
+        g_bag_full_detector.processRms(now, audioSnap.detectorMetrics.rms);
+    }
 
-    // 3. Read physical buttons and update live fishing controller (prevent start during setup/apply)
     const bool rawUp = (digitalRead(PIN_BUTTON_UP) == LOW);
     const bool rawDown = (digitalRead(PIN_BUTTON_DOWN) == LOW);
-    const bool allowStart = !paxg::wifi::getWifiSettingsManager().isSetupOrApplyActive();
-    g_fishing_controller.update(rawUp && allowStart, rawDown);
+    const bool upPressEdge = rawUp && !s_prevRawUp;
+    const bool downPressEdge = rawDown && !s_prevRawDown;
+    const bool upReleaseEdge = !rawUp && s_prevRawUp;
 
-    // 4. Publish synchronized status snapshot for web readers
+    // LCD-only token reveal: hold UP for 3s in PAXG mode while OTA is ready.
+    if (s_credentialsVisible && (downPressEdge || (upPressEdge && !s_upHoldTiming))) {
+        s_credentialsVisible = false;
+        s_navigationReleaseRequired = true;
+        s_credentialsRedrawNeeded = true;
+    }
+    if (s_credentialsVisible && (!paxg::ota::isReady() || s_otaHold || wifiManager.isSetupOrApplyActive() ||
+                                 s_modeNavigator.getMode() != paxg::ui::ScreenMode::PaxgMarket)) {
+        s_credentialsVisible = false;
+        s_navigationReleaseRequired = true;
+        s_credentialsRedrawNeeded = true;
+    }
+    if (s_credentialsVisible && static_cast<uint32_t>(now - s_credentialsShownAt) >= 30000) {
+        s_credentialsVisible = false;
+        s_navigationReleaseRequired = true;
+        s_credentialsRedrawNeeded = true;
+    }
+    const bool paxgMode = s_modeNavigator.getMode() == paxg::ui::ScreenMode::PaxgMarket;
+    if (paxgMode && paxg::ota::isReady() && !s_otaHold && !wifiManager.isSetupOrApplyActive() && rawUp && !rawDown) {
+        if (!s_upHoldTiming) {
+            s_upHoldTiming = true;
+            s_upHoldStartedAt = now;
+        } else if (static_cast<uint32_t>(now - s_upHoldStartedAt) >= 3000 && !s_credentialsVisible && !s_upRevealConsumed) {
+            s_credentialsVisible = true;
+            s_credentialsShownAt = now;
+            s_upRevealConsumed = true;
+        }
+    } else {
+        s_upHoldTiming = false;
+    }
+    if (upReleaseEdge) {
+        s_upHoldTiming = false;
+        s_upRevealConsumed = false;
+    }
+
+    const bool navPaused = s_otaHold || otaRuntime.isMaintenanceActive() || otaRuntime.hasFailed();
+    if (navPaused) {
+        s_navigationReleaseRequired = true;
+    } else if (s_navigationReleaseRequired) {
+        if (!rawUp && !rawDown) {
+            s_modeNavigator = paxg::ui::ModeNavigator(s_modeNavigator.getMode());
+            s_navigationReleaseRequired = false;
+        }
+    } else if (!s_credentialsVisible) {
+        const bool allowInput = !wifiManager.isSetupOrApplyActive();
+        s_modeNavigator.update(rawUp && allowInput, rawDown, now, g_fishing_controller);
+    }
+    s_prevRawUp = rawUp;
+    s_prevRawDown = rawDown;
+
+    // 6. Publish synchronized status snapshot for web readers
     paxg::web::publishStatusSnapshot(&g_fishing_controller, &g_bag_full_detector, &g_uac_audio_bridge,
                                      WiFi.isConnected() ? WiFi.localIP().toString().c_str() : nullptr);
 
-    // 5. Manage Fishing Web Server lifecycle (active for both STA and Setup AP)
-    static bool s_webServerStarted = false;
+    // 7. Manage Fishing Web Server lifecycle (active for both STA and Setup AP)
     if (!s_webServerStarted) {
         if (paxg::web::startFishingWebServer(&g_fishing_controller, &g_bag_full_detector, &g_uac_audio_bridge, 80)) {
             s_webServerStarted = true;
@@ -479,21 +995,76 @@ void loop() {
         }
     }
 
-    // 4. Rate-limited UI display refresh (10 FPS tick)
+    if (s_otaInitialized) paxg::ota::tick();
+    updateOtaHealthSnapshot(now, ownerLoopResponsive);
+    s_ownerLoopLastMs = now;
+
+    // Validate only after sustained local health; on failure request the official rollback once.
+    if (paxg::ota::pendingValidation()) {
+        if (!s_pendingValidationStartedAt) s_pendingValidationStartedAt = now;
+        const bool healthy = s_otaHealthSnapshot.healthy;
+        if (healthy) {
+            if (!s_healthySince) s_healthySince = now;
+            if (static_cast<uint32_t>(now - s_healthySince) >= 15000) {
+                const esp_err_t valid = esp_ota_mark_app_valid_cancel_rollback();
+                if (valid == ESP_OK) {
+                    s_pendingValidationStartedAt = 0;
+                    s_healthySince = 0;
+                    stopPendingValidationWatchdog();
+                    paxg::ota::logEvent("boot health stable; image marked valid");
+                } else {
+                    paxg::ota::logEvent("mark valid failed; retaining recovery mode");
+                }
+            }
+        } else {
+            s_healthySince = 0;
+        }
+        if (s_pendingValidationStartedAt && !s_rollbackAttempted &&
+            static_cast<uint32_t>(now - s_pendingValidationStartedAt) >= 90000) {
+            s_rollbackAttempted = true;
+            const esp_err_t rollback = esp_ota_mark_app_invalid_rollback_and_reboot();
+            if (rollback != ESP_OK) {
+                paxg::ota::logEvent("rollback request failed; staying available for recovery");
+            }
+        }
+    }
+
+    if (otaRuntime.restartDue(now)) esp_restart();
+
+    // 8. Rate-limited UI display refresh (10 FPS tick)
     static uint32_t s_lastUiRefreshMs = 0;
     if (now - s_lastUiRefreshMs >= 100) {
         s_lastUiRefreshMs = now;
-        renderFishingScreen(now);
+        const bool modeChanged = s_modeNavigator.isModeChanged();
+
+        if (s_otaHold || otaRuntime.isMaintenanceActive() || otaRuntime.hasFailed()) {
+            renderOtaProgressScreen(now);
+        } else if (s_credentialsVisible) {
+            renderOtaCredentialsScreen();
+        } else if (s_modeNavigator.getMode() == paxg::ui::ScreenMode::PaxgMarket) {
+            renderPaxgScreen(now, modeChanged || s_credentialsRedrawNeeded);
+            s_credentialsRedrawNeeded = false;
+        } else {
+            renderFishingScreen(now, modeChanged || s_credentialsRedrawNeeded);
+            s_credentialsRedrawNeeded = false;
+        }
+
+        if (modeChanged) {
+            s_modeNavigator.clearModeChanged();
+        }
     }
 
-    // 5. Rate-limited 1-second serial telemetry diagnostics
+    // 9. Rate-limited 1-second serial telemetry diagnostics
     static uint32_t s_lastSerialLogMs = 0;
     if (now - s_lastSerialLogMs >= 1000) {
         s_lastSerialLogMs = now;
         const bool mounted = usb_composite_is_mounted();
         const auto bagSnap = g_bag_full_detector.getMetrics();
+        const auto audioSnap = g_uac_audio_bridge.getMetricsSnapshot();
+        const auto otaProg = paxg::ota::getOtaRuntime().getProgress();
 
-        Serial.printf("[FIRMWARE] arm=%d fsm=%s rem=%lums | usb=%d pkts=%llu rms=%.1f | bagFull=%d (dt=%lums, n=%lu) | stop=%s\n",
+        Serial.printf("[FIRMWARE] mode=%s arm=%d fsm=%s rem=%lums | usb=%d pkts=%llu rms=%.1f | bagFull=%d (dt=%lums, n=%lu) | stop=%s | ota=%s(%u%%)\n",
+                      (s_modeNavigator.getMode() == paxg::ui::ScreenMode::PaxgMarket) ? "PAXG" : "FISHING",
                       g_fishing_controller.isArmed() ? 1 : 0,
                       paxg::fishing::getFishingStateName(g_fishing_controller.getState()),
                       (unsigned long)g_fishing_controller.getWaitRemainingMs(),
@@ -503,11 +1074,12 @@ void loop() {
                       bagSnap.bagFullLatched ? 1 : 0,
                       (unsigned long)bagSnap.lastIntervalMs,
                       (unsigned long)bagSnap.totalPulsesDetected,
-                      paxg::fishing::getStopReasonName(g_fishing_controller.getLastStopReason()));
+                      paxg::fishing::getStopReasonName(g_fishing_controller.getLastStopReason()),
+                      paxg::ota::getOtaStateName(otaProg.state),
+                      (unsigned int)otaProg.percent);
     }
 
     (void)g_hid_demo_ref;
-    (void)g_paxg_anchor_ref;
     delay(10);
 }
 

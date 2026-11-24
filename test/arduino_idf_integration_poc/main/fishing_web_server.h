@@ -81,6 +81,9 @@ void processPendingCommands(paxg::fishing::LiveFishingController* controller,
                             paxg::audio::BagFullDetector* bagFullDetector,
                             uint32_t nowMs);
 
+/** Close start/arm admission and purge queued commands during OTA maintenance. */
+void setMaintenanceActive(bool active);
+
 /**
  * @brief Publish a thread-safe synchronized status snapshot from the controller owner loop.
  */

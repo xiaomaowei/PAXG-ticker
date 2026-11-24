@@ -5,6 +5,7 @@
 #include <mutex>
 #include <cctype>
 #include <cmath>
+#include <atomic>
 
 #if defined(ARDUINO) || defined(ESP_PLATFORM)
 #include <Arduino.h>
@@ -30,6 +31,7 @@ double s_priceHistory[MAX_PRICE_HISTORY] = {0.0};
 
 #if defined(ARDUINO) || defined(ESP_PLATFORM)
 TaskHandle_t s_quoteTaskHandle = nullptr;
+std::atomic<bool> s_quotePaused{false};
 constexpr const char* BINANCE_PAXG_ENDPOINT = "https://api.binance.com/api/v3/ticker/24hr?symbol=PAXGUSDT";
 constexpr uint32_t HTTP_TIMEOUT_MS = 5000;
 constexpr uint32_t POLL_INTERVAL_SECONDS = 60;
@@ -545,27 +547,11 @@ void resetMarketQuoteState() {
 static void paxgQuoteWorkerTask(void* pvParameters) {
     (void)pvParameters;
 
-    // Strict NVS preservation: never overwrite or commit Wi-Fi credentials to NVS flash
+    // Strict NVS preservation: WiFi lifecycle is managed by WifiSettingsManager
     WiFi.persistent(false);
-    WiFi.mode(WIFI_STA);
-
-#if defined(WIFI_SSID) && defined(WIFI_PASSWORD)
-    const char* ssid = WIFI_SSID;
-    const char* pass = WIFI_PASSWORD;
-    if (ssid != nullptr && std::strlen(ssid) > 0) {
-        WiFi.begin(ssid, pass);
-    } else {
-        WiFi.begin();
-    }
-#else
-    WiFi.begin();
-#endif
-
-    uint32_t lastReconnectAttemptMs = 0;
 
     while (true) {
-        const uint32_t nowMs = millis();
-        if (WiFi.status() == WL_CONNECTED) {
+        if (!s_quotePaused.load(std::memory_order_acquire) && WiFi.status() == WL_CONNECTED) {
             NetworkClientSecure client;
             // Authenticated TLS using DigiCert Global Root G2 certificate
             client.setCACert(BINANCE_ROOT_CA_PEM);
@@ -594,11 +580,6 @@ static void paxgQuoteWorkerTask(void* pvParameters) {
             }
         } else {
             markMarketQuoteFetchFailed();
-            // Throttled reconnect attempt to avoid blocking or RF saturation
-            if (nowMs - lastReconnectAttemptMs >= WIFI_RECONNECT_INTERVAL_MS) {
-                lastReconnectAttemptMs = nowMs;
-                WiFi.reconnect();
-            }
         }
 
         // Bounded sleep: 60s total, checked in 1s ticks so task remains responsive
@@ -607,6 +588,12 @@ static void paxgQuoteWorkerTask(void* pvParameters) {
         }
     }
 }
+
+void setPaxgQuotePaused(bool paused) {
+    s_quotePaused.store(paused, std::memory_order_release);
+}
+
+bool isPaxgQuoteWorkerRunning() { return s_quoteTaskHandle != nullptr; }
 
 void startPaxgQuoteWorker() {
     if (s_quoteTaskHandle != nullptr) {
@@ -627,6 +614,8 @@ void startPaxgQuoteWorker() {
 void startPaxgQuoteWorker() {
     // Host test stub
 }
+void setPaxgQuotePaused(bool) {}
+bool isPaxgQuoteWorkerRunning() { return false; }
 #endif
 
 } // namespace market

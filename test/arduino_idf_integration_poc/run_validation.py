@@ -322,6 +322,31 @@ def run_native_pipeline_tests():
     if wifi_pdb.is_file():
         wifi_pdb.unlink(missing_ok=True)
 
+    # 6. Compile and run the OTA owner-loop state and HID release handshake tests
+    print("\n--- Running OTA Owner-Loop Runtime Native Tests ---")
+    ota_test_src = TEST_DIR / "test_ota_runtime.cpp"
+    ota_runtime_src = MAIN_DIR / "ota_runtime.cpp"
+    ota_exe = TEST_DIR / "test_ota_runtime_native.exe"
+    compile_ota_cmd = cxx + [
+        "-std=c++11", "-Wall", "-Wextra", "-Werror",
+        "-I" + str(REPO_ROOT / "include"),
+        "-I" + str(MAIN_DIR),
+        str(ota_test_src), str(ota_runtime_src), str(ctrl_src),
+        "-o", str(ota_exe)
+    ]
+    res_ota_compile = subprocess.run(compile_ota_cmd, capture_output=True, text=True)
+    if res_ota_compile.returncode != 0:
+        print(f"[FAIL] OTA runtime test compilation failed:\n{res_ota_compile.stderr}")
+        sys.exit(res_ota_compile.returncode)
+    res_ota_run = subprocess.run([str(ota_exe)], capture_output=True, text=True)
+    print(res_ota_run.stdout)
+    if res_ota_run.returncode != 0:
+        print(f"[FAIL] OTA runtime test assertions failed with exit code {res_ota_run.returncode}")
+        ota_exe.unlink(missing_ok=True)
+        sys.exit(res_ota_run.returncode)
+    print("  -> ALL 4 NATIVE OTA RUNTIME TESTS EXECUTED AND PASSED.")
+    ota_exe.unlink(missing_ok=True)
+
     # Cross-compile check with xtensa-esp32s3-elf-g++
     xtensa_gpp = find_xtensa_gpp()
     if not xtensa_gpp:
@@ -329,7 +354,7 @@ def run_native_pipeline_tests():
         sys.exit(1)
 
     print("\n  Cross-compiling bridge, controller, quote, bag-full, web server, wifi settings and test sources with xtensa-esp32s3-elf-g++...")
-    for src in [bridge_src, test_src, ctrl_src, ctrl_test_src, detector_src, queue_src, paxg_quote_src, paxg_test_src, mode_nav_src, bag_detector_src, web_server_src, bag_test_src, wifi_settings_src, wifi_test_src]:
+    for src in [bridge_src, test_src, ctrl_src, ctrl_test_src, detector_src, queue_src, paxg_quote_src, paxg_test_src, mode_nav_src, bag_detector_src, web_server_src, bag_test_src, wifi_settings_src, wifi_test_src, ota_runtime_src, ota_test_src]:
         obj = TEST_DIR / f"{src.stem}_cross.o"
         compiler = xtensa_gpp
         std_flag = "-std=gnu++11"

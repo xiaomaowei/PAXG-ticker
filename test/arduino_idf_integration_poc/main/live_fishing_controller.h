@@ -134,7 +134,7 @@ public:
     static constexpr uint32_t STOP_PRESS_DURATION_MS = 50UL;   // Debounce for DOWN stop
     static constexpr uint32_t KEY_PRESS_HOLD_MS = 80UL;        // Non-blocking key hold
     static constexpr uint32_t PRESS_RETRY_TIMEOUT_MS = 500UL;  // Max duration to retry press
-    static constexpr uint32_t CASTING_DURATION_MS = 1500UL;    // Cast presentation delay
+    static constexpr uint32_t CASTING_DURATION_MS = 2200UL;    // Ignore cast and splash audio after accepted Space
     static constexpr uint32_t BITE_DETECTED_DURATION_MS = 300UL; // Presentation pause
     static constexpr uint32_t REELING_DURATION_MS = 1200UL;    // Reel animation delay
     static constexpr uint32_t TIMEOUT_DURATION_MS = 1500UL;    // Timeout presentation indication delay before Cooldown
@@ -142,6 +142,7 @@ public:
     static constexpr uint32_t GAME_CAST_DURATION_MS = 30000UL; // User-reported 30s cast duration from accepted cast press
     static constexpr uint32_t WAIT_TIMEOUT_MS = GAME_CAST_DURATION_MS; // Backwards-compatible alias
     static constexpr uint32_t STREAM_TIMEOUT_MS = 1000UL;      // 1s audio freshness limit
+    static constexpr uint32_t STREAM_SETTLE_MS = 250UL;        // Stable audio before resuming HID presses
 
     LiveFishingController(IHidKeyboard* hid, IClock* clock, IAudioStream* audioStream);
 
@@ -177,10 +178,16 @@ public:
     void disarm();
     bool requestStart();
     void requestStop(StopReason reason = StopReason::UserStopped);
+    void updateKeypress(uint32_t now);
+
+    // Optional notification callback invoked on active-to-Idle transition due to BAG_FULL
+    using BagFullStopCallback = void (*)();
+    void setBagFullStopCallback(BagFullStopCallback cb) {
+        bagFullStopCallback_ = cb;
+    }
 
 private:
     void handleButtons(bool btnUp, bool btnDown, uint32_t now);
-    void updateKeypress(uint32_t now);
     void checkSafetyGuards(uint32_t now);
     void processFsm(uint32_t now);
     bool beginKeyPress(uint8_t keycode, uint32_t now);
@@ -212,8 +219,12 @@ private:
     uint64_t lastPacketsReceived_ = 0;
     uint32_t lastPacketArrivalMs_ = 0;
     uint64_t armPacketsBaseline_ = 0;
-    uint64_t initialDiscontinuities_ = 0;
+    uint64_t lastDiscontinuities_ = 0;
     uint32_t initialQueueDrops_ = 0;
+    bool recoveringAudio_ = false;
+    uint32_t recoveryStartedMs_ = 0;
+    uint32_t lastStreamChangeMs_ = 0;
+    uint64_t packetsAtStreamChange_ = 0;
 
     // Non-blocking HID key state
     KeyState keyState_ = KeyState::Idle;
@@ -226,6 +237,9 @@ private:
     uint32_t totalBites_ = 0;
     uint32_t totalReels_ = 0;
     uint32_t totalTimeouts_ = 0;
+
+    // Optional BAG_FULL stop callback
+    BagFullStopCallback bagFullStopCallback_ = nullptr;
 };
 
 }  // namespace fishing

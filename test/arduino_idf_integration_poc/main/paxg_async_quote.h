@@ -93,5 +93,9 @@ void resetMarketQuoteState();
  */
 void startPaxgQuoteWorker();
 
+/** Prevent the background worker from starting additional network fetches. */
+void setPaxgQuotePaused(bool paused);
+bool isPaxgQuoteWorkerRunning();
+
 } // namespace market
 } // namespace paxg
