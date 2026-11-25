@@ -47,7 +47,7 @@ static void processBagFullRms(float rms) {
 static_assert(paxg::uac::UacAudioBridge::EXPECTED_SAMPLE_RATE == paxg::audio::reference::rate);
 static paxg::uac::UacAudioBridge g_uac_audio_bridge(nullptr, paxg::audio::pushMatchPcm, processBagFullRms);
 static std::atomic<bool> s_otaAudioPaused{false};
-static std::atomic<uint32_t> s_audioStreamChanges{0};
+static std::atomic<uint32_t> s_audioDiscontinuities{0};
 
 // Audio output callback invoked from speaker FreeRTOS task (usb_spk_task)
 static esp_err_t test_audio_output_cb(uint8_t *buf, size_t len, void *arg) {
@@ -59,13 +59,12 @@ static esp_err_t test_audio_output_cb(uint8_t *buf, size_t len, void *arg) {
 }
 
 // Audio discontinuity callback invoked from consumer task (usb_spk_task)
-static void test_audio_discontinuity_cb(uint32_t reason, void *arg) {
+static void test_audio_discontinuity_cb(uint32_t, void *arg) {
     (void)arg;
     g_uac_audio_bridge.resetResidualOnStreamBreak();
     paxg::audio::resetMatchStream();
-    if (reason == UAC_DISCONTINUITY_REASON_STREAM_CHANGE) {
-        s_audioStreamChanges.fetch_add(1, std::memory_order_release);
-    }
+    // Resume only after the dropped packet boundary has reached the USB consumer.
+    s_audioDiscontinuities.fetch_add(1, std::memory_order_release);
 }
 
 // Audio mute callback strictly on host mute-control requests
@@ -109,7 +108,7 @@ public:
         return bridge_ ? bridge_->getMetricsSnapshot().packetsReceived : 0;
     }
     uint64_t getDiscontinuities() const override {
-        return s_audioStreamChanges.load(std::memory_order_acquire);
+        return s_audioDiscontinuities.load(std::memory_order_acquire);
     }
     uint32_t getQueueDrops() const override {
         usb_composite_audio_stats_t stats{};

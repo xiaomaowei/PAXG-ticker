@@ -145,7 +145,7 @@ The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):
   - Switching from Real Fishing to PAXG Market calls `requestStop(StopReason::UserStopped)` and forces `armed = false`.
   - While in PAXG Market screen, the fishing controller runs with zero simulated buttons (`update(false, false)`). It continues servicing background USB and audio telemetry, but can never send a keystroke.
   - Switching from PAXG Market to Real Fishing initializes the screen strictly in `DISARMED` and `IDLE`. Keystrokes cannot be emitted until the user deliberately holds both buttons for 1.0s to arm, releases both buttons, and presses UP.
-- **Fail-Closed Safety**: Any USB host disconnect, audio stream stall (> 1.0s), or driver queue overflow immediately disarms the controller and transitions to Idle. Rearming upon reconnect is strictly prohibited.
+- **Fail-Closed Safety**: USB host disconnect or audio loss stops fishing and disarms the controller. A USB queue drop pauses new keystrokes and discards pending bite input. Fishing resumes after 250 ms without another gap and fresh audio, or stops and disarms if recovery takes 1 second. The Fishing status API reports the cumulative USB queue drop count. Reconnecting requires deliberate rearming.
 - **Setup Isolation**: Wi-Fi configuration via `.env` is loaded safely using `WiFi.persistent(false)` to prevent writing temporary credentials to Flash NVS.
 
 ### Target Firmware Build & Symbol Verification

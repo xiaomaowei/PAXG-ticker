@@ -47,6 +47,7 @@ struct WebServerStatus {
     uint32_t totalTimeouts = 0;
     bool usbMounted = false;
     uint64_t audioPackets = 0;
+    uint32_t usbQueueDrops = 0;
     float audioRms = 0.0f;
     uint32_t audioPeak = 0;
     bool bagFull = false;

@@ -513,6 +513,9 @@ void publishStatusSnapshot(const paxg::fishing::LiveFishingController* controlle
     }
 #if defined(ARDUINO) || defined(ESP_PLATFORM)
     snap.usbMounted = usb_composite_is_mounted();
+    usb_composite_audio_stats_t usbStats{};
+    usb_composite_get_audio_stats(&usbStats);
+    snap.usbQueueDrops = usbStats.packets_dropped;
     if (ipOverride && ipOverride[0] != '\0') {
         std::strncpy(snap.localIp, ipOverride, sizeof(snap.localIp) - 1);
     } else if (WiFi.isConnected()) {
@@ -560,6 +563,7 @@ size_t buildStatusJson(const WebServerStatus& status, char* outBuf, size_t maxLe
         "\"usb_mounted\":%s,"
         "\"audio_packets\":%llu,"
         "\"audio_rms\":%.1f,"
+        "\"usb_queue_drops\":%u,"
         "\"bag_full\":%s,"
         "\"bell_continuing\":%s,"
         "\"bag_interval_ms\":%u,"
@@ -579,6 +583,7 @@ size_t buildStatusJson(const WebServerStatus& status, char* outBuf, size_t maxLe
         status.usbMounted ? "true" : "false",
         static_cast<unsigned long long>(status.audioPackets),
         static_cast<double>(status.audioRms),
+        static_cast<unsigned int>(status.usbQueueDrops),
         status.bagFull ? "true" : "false",
         status.bellContinuing ? "true" : "false",
         static_cast<unsigned int>(status.bagIntervalMs),
