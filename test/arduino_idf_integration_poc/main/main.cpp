@@ -37,13 +37,16 @@ void dummy_wifi_symbol_retention_anchor() {
 }
 void (* volatile g_wifi_anchor_ref)() = &dummy_wifi_symbol_retention_anchor;
 
+// Evidence-calibrated full-bag addon bell detector (3000ms +/- 350ms period)
+static paxg::audio::BagFullDetector g_bag_full_detector;
+static void processBagFullRms(float rms) {
+    g_bag_full_detector.processRms(millis(), rms);
+}
+
 // Bounded allocation-free UAC PCM bridge feeding production PcmAudioDetector
 static_assert(paxg::uac::UacAudioBridge::EXPECTED_SAMPLE_RATE == paxg::audio::reference::rate);
-static paxg::uac::UacAudioBridge g_uac_audio_bridge(nullptr, paxg::audio::pushMatchPcm);
+static paxg::uac::UacAudioBridge g_uac_audio_bridge(nullptr, paxg::audio::pushMatchPcm, processBagFullRms);
 static std::atomic<bool> s_otaAudioPaused{false};
-
-// Evidence-calibrated full-bag addon bell detector (3000ms +/- 350ms period, threshold > 3000)
-static paxg::audio::BagFullDetector g_bag_full_detector;
 static std::atomic<uint32_t> s_audioStreamChanges{0};
 
 // Audio output callback invoked from speaker FreeRTOS task (usb_spk_task)
@@ -824,7 +827,9 @@ void setup() {
     // 2. Initialize UAC 48kHz PCM Bridge and production PcmAudioDetector
     paxg::audio::AudioDetectorConfig audioCfg;
     audioCfg.sampleRate = 48000;
-    audioCfg.frameSize = 384;      // 8.0 ms frame duration at 48 kHz
+    audioCfg.frameSize = paxg::uac::UacAudioBridge::DEFAULT_FRAME_SIZE; // 8 ms at 48 kHz
+    static_assert(paxg::uac::UacAudioBridge::DEFAULT_FRAME_SIZE >=
+                  paxg::uac::UacAudioBridge::SCRATCH_BUFFER_CAPACITY);
     audioCfg.debounceFrames = 4;   // Require 32 ms above threshold for a bite
     audioCfg.cooldownFrames = 25;  // 200.0 ms lockout following trigger
     audioCfg.absoluteThreshold = 1500;
@@ -934,11 +939,6 @@ void loop() {
 
     // Drain only the emergency stop while maintenance is held; start/arm queues were purged.
     paxg::web::processPendingCommands(&g_fishing_controller, &g_bag_full_detector, now);
-
-    if (!s_otaAudioPaused.load(std::memory_order_acquire)) {
-        const auto audioSnap = g_uac_audio_bridge.getMetricsSnapshot();
-        g_bag_full_detector.processRms(now, audioSnap.detectorMetrics.rms);
-    }
 
     const bool rawUp = (digitalRead(PIN_BUTTON_UP) == LOW);
     const bool rawDown = (digitalRead(PIN_BUTTON_DOWN) == LOW);

@@ -5,9 +5,10 @@
 namespace paxg {
 namespace uac {
 
-UacAudioBridge::UacAudioBridge(paxg::audio::IAudioDetector* externalDetector, MonoSink monoSink)
+UacAudioBridge::UacAudioBridge(paxg::audio::IAudioDetector* externalDetector, MonoSink monoSink, RmsSink rmsSink)
     : detector_(nullptr),
       monoSink_(monoSink),
+      rmsSink_(rmsSink),
       residualLen_(0),
       packetsReceived_(0),
       bytesReceived_(0),
@@ -78,6 +79,16 @@ void UacAudioBridge::resetLocked() {
     updateSnapshotLocked();
 }
 
+void UacAudioBridge::feedMonoLocked(size_t count) {
+    const auto previousFrames = rmsSink_ ? detector_->getMetrics().totalFramesProcessed : 0;
+    detector_->processSamples(monoScratch_, count);
+    if (rmsSink_) {
+        const auto metrics = detector_->getMetrics();
+        if (metrics.totalFramesProcessed != previousFrames) rmsSink_(metrics.rms);
+    }
+    if (monoSink_) monoSink_(monoScratch_, count);
+}
+
 size_t UacAudioBridge::consumeUacChunk(const uint8_t* buf, size_t len) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -130,16 +141,14 @@ size_t UacAudioBridge::consumeUacChunk(const uint8_t* buf, size_t len) {
         inIdx += BYTES_PER_FRAME;
 
         if (scratchCount == SCRATCH_BUFFER_CAPACITY) {
-            detector_->processSamples(monoScratch_, scratchCount);
-            if (monoSink_) monoSink_(monoScratch_, scratchCount);
+            feedMonoLocked(scratchCount);
             scratchCount = 0;
         }
     }
 
     // Flush any pending mono samples to the detector
     if (scratchCount > 0) {
-        detector_->processSamples(monoScratch_, scratchCount);
-        if (monoSink_) monoSink_(monoScratch_, scratchCount);
+        feedMonoLocked(scratchCount);
         scratchCount = 0;
     }
 

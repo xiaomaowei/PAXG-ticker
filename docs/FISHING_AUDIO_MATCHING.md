@@ -2,6 +2,8 @@
 
 The integrated ESP32-S3 firmware defaults to Legacy Amplitude. On the Fishing web page, open **Audio detection settings** and select **Spectral Matching (monitor only)** to analyze USB playback. Entering spectral mode requests a stop and disarm before persisting the change. The physical and web controls that start fishing are gated in this mode. Events appear in the page counter and serial log. Returning to Legacy Amplitude or restoring defaults requires a fresh arm action.
 
+Bag-full detection uses every completed legacy RMS frame. The bell threshold and required matching intervals are unchanged. A local build needs both Wi-Fi settings and the optional MacroDroid webhook setting in its own ignored .env.
+
 Settings are stored in NVS under `paxg_audio/match_v1`. Defaults are Legacy Amplitude, a 74% threshold, all three templates enabled, and debug disabled. Template toggles affect best-match selection and event decisions, while individual scores remain visible. The open section polls `GET /api/audio` at most once per second with a single poll in flight. Debug adds maximum DSP time and the DSP task's stack low-water mark. Buffer usage and drops refer to the DSP ring in mono PCM frames. Existing USB packet counters remain in Fishing telemetry.
 
 ## Reproduce analysis, templates and synthetic evaluation
