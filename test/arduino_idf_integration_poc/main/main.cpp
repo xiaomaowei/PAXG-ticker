@@ -13,6 +13,7 @@
 #include "usb_audio_queue.h"
 #include "usb_device_composite.h"
 #include "uac_audio_bridge.h"
+#include "audio_match.h"
 #include "live_fishing_controller.h"
 #include "bag_full_detector.h"
 #include "fishing_web_server.h"
@@ -37,7 +38,8 @@ void dummy_wifi_symbol_retention_anchor() {
 void (* volatile g_wifi_anchor_ref)() = &dummy_wifi_symbol_retention_anchor;
 
 // Bounded allocation-free UAC PCM bridge feeding production PcmAudioDetector
-static paxg::uac::UacAudioBridge g_uac_audio_bridge;
+static_assert(paxg::uac::UacAudioBridge::EXPECTED_SAMPLE_RATE == paxg::audio::reference::rate);
+static paxg::uac::UacAudioBridge g_uac_audio_bridge(nullptr, paxg::audio::pushMatchPcm);
 static std::atomic<bool> s_otaAudioPaused{false};
 
 // Evidence-calibrated full-bag addon bell detector (3000ms +/- 350ms period, threshold > 3000)
@@ -57,6 +59,7 @@ static esp_err_t test_audio_output_cb(uint8_t *buf, size_t len, void *arg) {
 static void test_audio_discontinuity_cb(uint32_t reason, void *arg) {
     (void)arg;
     g_uac_audio_bridge.resetResidualOnStreamBreak();
+    paxg::audio::resetMatchStream();
     if (reason == UAC_DISCONTINUITY_REASON_STREAM_CHANGE) {
         s_audioStreamChanges.fetch_add(1, std::memory_order_release);
     }
@@ -78,6 +81,7 @@ public:
         return usb_composite_hid_ready();
     }
     bool press(uint8_t modifier, uint8_t keycode) override {
+        if (paxg::audio::spectralMonitorSelected()) return false;
         return (usb_composite_hid_keyboard_press(modifier, keycode) == ESP_OK);
     }
     bool release() override {
@@ -214,6 +218,7 @@ static bool otaMaintenanceBegin(uint32_t timeoutMs) {
     }
     paxg::market::setPaxgQuotePaused(true);
     s_otaAudioPaused.store(true, std::memory_order_release);
+    paxg::audio::resetMatchStream();
 
     const uint32_t started = millis();
     while (static_cast<uint32_t>(millis() - started) < timeoutMs) {
@@ -809,6 +814,7 @@ static void renderFishingScreen(uint32_t now, bool forceRedraw = false) {
 // Setup & Loop
 // ----------------------------------------------------------------------------
 void setup() {
+    paxg::audio::initAudioMatch();
     Serial.begin(115200);
 
     // 1. Initialize physical buttons
@@ -919,6 +925,13 @@ void loop() {
         g_uac_audio_bridge.resetResidualOnStreamBreak();
     }
 
+    const bool spectralMonitor = paxg::audio::spectralMonitorSelected();
+    if (spectralMonitor && (g_fishing_controller.isArmed() ||
+        g_fishing_controller.getState() != paxg::fishing::FishingState::Idle)) {
+        g_fishing_controller.requestStop(paxg::fishing::StopReason::UserStopped);
+        g_fishing_controller.disarm();
+    }
+
     // Drain only the emergency stop while maintenance is held; start/arm queues were purged.
     paxg::web::processPendingCommands(&g_fishing_controller, &g_bag_full_detector, now);
 
@@ -978,7 +991,7 @@ void loop() {
         }
     } else if (!s_credentialsVisible) {
         const bool allowInput = !wifiManager.isSetupOrApplyActive();
-        s_modeNavigator.update(rawUp && allowInput, rawDown, now, g_fishing_controller);
+        s_modeNavigator.update(rawUp && allowInput && !spectralMonitor, rawDown, now, g_fishing_controller);
     }
     s_prevRawUp = rawUp;
     s_prevRawDown = rawDown;

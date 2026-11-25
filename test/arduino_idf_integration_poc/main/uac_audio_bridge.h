@@ -57,7 +57,9 @@ public:
     static constexpr size_t DEFAULT_FRAME_SIZE = 384;  // 8.0 ms at 48 kHz (matches 128 samples at 16 kHz)
     static constexpr size_t SCRATCH_BUFFER_CAPACITY = 128; // Bounded mono staging buffer
 
-    explicit UacAudioBridge(paxg::audio::IAudioDetector* externalDetector = nullptr);
+    using MonoSink = void (*)(const int16_t*, size_t);
+    explicit UacAudioBridge(paxg::audio::IAudioDetector* externalDetector = nullptr,
+                            MonoSink monoSink = nullptr);
     ~UacAudioBridge() = default;
 
     // Non-copyable, non-movable to ensure deterministic task ownership
@@ -132,6 +134,7 @@ private:
     void updateSnapshotLocked();
 
     paxg::audio::IAudioDetector* detector_;
+    const MonoSink monoSink_;
     paxg::audio::PcmAudioDetector defaultDetector_;
     mutable std::mutex mutex_;
 

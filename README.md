@@ -120,6 +120,10 @@ Tip: Click any image to open the full-size version.
 - [docs](docs): architectural and feasibility documentation ([docs/usb_feasibility.md](docs/usb_feasibility.md), [docs/OTA.md](docs/OTA.md))
 - [platformio.ini](platformio.ini): root PlatformIO configuration
 
+## Experimental Fishing Audio Matching
+
+Open **Audio detection settings** on the Fishing web page to select Spectral Matching for USB-audio monitoring. Legacy Amplitude remains the default. See [the audio matching guide](docs/FISHING_AUDIO_MATCHING.md) for template generation, validation, resource use and rollback.
+
 ## Button Controls & Safe Navigation
 
 The device provides two active-low pushbuttons (GPIO 14 UP, GPIO 0 DOWN):

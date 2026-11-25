@@ -1,6 +1,7 @@
 #include "fishing_web_server.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <condition_variable>
@@ -16,6 +17,8 @@
 #endif
 
 #include "fishing_wifi_settings.h"
+#include "audio_match.h"
+#include <esp_system.h>
 
 namespace paxg {
 namespace web {
@@ -134,6 +137,83 @@ static const char INDEX_HTML[] =
 "</div>\n"
 "<div class=\"footer\">Strict Fail-Closed | USB & Audio Safe Gating Active</div>\n"
 "</div>\n"
+R"AUDIO(
+<details id="audio-settings" style="margin:14px 0">
+<summary>Audio detection settings</summary>
+<form id="audio-form">
+<label>Detection Mode <select id="audio-mode"><option value="0">Legacy Amplitude</option><option value="1">Spectral Matching (monitor only)</option></select></label>
+<label>Similarity Threshold (%) <input id="audio-threshold" type="number" min="1" max="100" required></label>
+<label><input type="checkbox" id="audio-debug"> Audio Debug Mode</label>
+<fieldset><legend>Reference templates</legend>
+<label><input type="checkbox" id="audio-t1"> Template 1</label>
+<label><input type="checkbox" id="audio-t2"> Template 2</label>
+<label><input type="checkbox" id="audio-t3"> Template 3</label>
+</fieldset>
+<button type="submit">Save audio settings</button>
+<button type="button" id="audio-reset">Restore Default Settings</button>
+</form>
+<output id="audio-message" role="status"></output>
+<pre id="audio-metrics" style="white-space:pre-wrap"></pre>
+</details>
+<script>
+(() => {
+  const $ = id => document.getElementById('audio-' + id);
+  let initialized = false, polling = false, saving = false;
+  function update(d, controls) {
+    if (controls) {
+      $('mode').value = d.mode;
+      $('threshold').value = d.threshold;
+      $('debug').checked = !!d.debug;
+      [1,2,3].forEach(i => $('t'+i).checked = !!(d.mask & (1 << (i-1))));
+      initialized = true;
+    }
+    const lines = [
+      'Current RMS / peak  ' + d.rms.toFixed(4) + ' / ' + d.peak.toFixed(4),
+      ...d.scores.map((score,i) => 'Template '+(i+1)+' similarity  '+(d.mode ? score.toFixed(3) : '—')),
+      'Best matching template  ' + (d.mode && d.best ? d.best : '—'),
+      'Detection event count  ' + d.events,
+      'Audio buffer usage  ' + d.queued + ' / 4096 PCM frames',
+      'Dropped audio frames  ' + d.dropped,
+      'DSP processing time  ' + d.dsp_us + ' µs',
+      'Free / minimum free heap  ' + d.heap + ' / ' + d.min_heap + ' bytes'
+    ];
+    if (d.debug) lines.push('Maximum DSP time  '+d.max_dsp_us+' µs', 'DSP stack low-water mark  '+d.stack_free+' bytes');
+    if (d.mode && !d.running) lines.push('DSP task unavailable');
+    $('metrics').textContent = lines.join('\n');
+  }
+  async function request(query) {
+    const response = await fetch('/api/audio' + (query ? '?' + query : ''), {method:query ? 'POST' : 'GET'});
+    if (!response.ok) throw Error(await response.text());
+    return response.json();
+  }
+  async function poll() {
+    if (!$('settings').open || saving || polling) return;
+    polling = true;
+    try {
+      const result = await request();
+      if (!saving) update(result, !initialized);
+    } catch (_) {
+      $('metrics').textContent = 'Audio telemetry unavailable';
+    } finally { polling = false; }
+  }
+  async function save(query) {
+    if (saving) return;
+    saving = true;
+    try { update(await request(query), true); $('message').textContent = 'Saved'; }
+    catch (err) { $('message').textContent = err.message; }
+    finally { saving = false; }
+  }
+  $('form').onsubmit = event => {
+    event.preventDefault();
+    const mask = [1,2,3].reduce((sum,i) => sum + ($('t'+i).checked ? 1 << (i-1) : 0), 0);
+    save(new URLSearchParams({mode:$('mode').value,threshold:$('threshold').value,mask,debug:+$('debug').checked}));
+  };
+  $('reset').onclick = () => save('restore=1');
+  $('settings').ontoggle = poll;
+  setInterval(poll, 1000);
+})();
+</script>
+)AUDIO"
 "<script>\n"
 "function update(){\n"
 "fetch('/api/status').then(r=>r.json()).then(d=>{\n"
@@ -421,6 +501,7 @@ void publishStatusSnapshot(const paxg::fishing::LiveFishingController* controlle
         const auto bSnap = bridge->getMetricsSnapshot();
         snap.audioPackets = bSnap.packetsReceived;
         snap.audioRms = bSnap.detectorMetrics.rms;
+        snap.audioPeak = bSnap.detectorMetrics.peak;
     }
     if (bagFullDetector) {
         const auto m = bagFullDetector->getMetrics();
@@ -671,7 +752,72 @@ static esp_err_t get_status_handler(httpd_req_t *req) {
     return httpd_resp_send(req, jsonBuf, HTTPD_RESP_USE_STRLEN);
 }
 
+static esp_err_t audioMonitorConflict(httpd_req_t* req) {
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"success\":false,\"reason\":\"SPECTRAL_MONITOR_ONLY\"}");
+}
+
+static esp_err_t get_audio_handler(httpd_req_t* req) {
+    const auto config = paxg::audio::matchSettings();
+    const auto m = paxg::audio::matchMetrics();
+    const auto legacy = getPublishedStatusSnapshot();
+    char json[512];
+    std::snprintf(json, sizeof(json),
+        "{\"mode\":%u,\"threshold\":%u,\"mask\":%u,\"debug\":%u,\"rms\":%.6f,\"peak\":%.6f,"
+        "\"scores\":[%.4f,%.4f,%.4f],\"best\":%u,\"events\":%u,"
+        "\"queued\":%u,\"dropped\":%u,\"dsp_us\":%u,\"max_dsp_us\":%u,"
+        "\"stack_free\":%u,\"heap\":%u,\"min_heap\":%u,\"running\":%s}",
+        unsigned(config.spectral), unsigned(config.thresholdPercent), unsigned(config.templateMask), unsigned(config.debug),
+        config.spectral ? m.rms : legacy.audioRms / 32768.0f,
+        config.spectral ? m.peak : legacy.audioPeak / 32768.0f,
+        m.scores[0], m.scores[1], m.scores[2], m.best, m.events, m.queuedFrames, m.droppedFrames,
+        m.dspUs, m.maxDspUs, m.stackFree, unsigned(esp_get_free_heap_size()), unsigned(esp_get_minimum_free_heap_size()),
+        m.running ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, json);
+}
+
+static esp_err_t post_audio_handler(httpd_req_t* req) {
+    if (isRequestFromSetupAp(req) || paxg::wifi::isSetupOrApplyActive() || isMaintenanceActive()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Audio settings unavailable during setup or OTA");
+    }
+    char query[96], value[8];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing audio settings");
+    paxg::audio::MatchSettings config;
+    auto number = [&](const char* key, uint32_t& field, unsigned min, unsigned max) {
+        if (httpd_query_key_value(query, key, value, sizeof(value)) != ESP_OK ||
+            value[0] == '\0' || std::strspn(value, "0123456789") != std::strlen(value)) return false;
+        const auto parsed = std::strtoul(value, nullptr, 10);
+        if (parsed < min || parsed > max) return false;
+        field = parsed;
+        return true;
+    };
+    if (std::strcmp(query, "restore=1") != 0 &&
+        !(number("mode", config.spectral, 0, 1) && number("threshold", config.thresholdPercent, 1, 100) &&
+          number("mask", config.templateMask, 0, 7) && number("debug", config.debug, 0, 1)))
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid audio settings");
+    if (config.spectral && !paxg::audio::spectralMonitorSelected()) {
+        const auto stop = submitCommandSync(CommandType::Stop, 500);
+        if (!stop.success || stop.armed || stop.state != paxg::fishing::FishingState::Idle)
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Fishing stop failed");
+    }
+    if (isMaintenanceActive()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Audio settings unavailable during OTA");
+    }
+    if (paxg::audio::saveMatchSettings(config) != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not save audio settings");
+    return get_audio_handler(req);
+}
+
+
+
 static esp_err_t post_start_handler(httpd_req_t *req) {
+    if (paxg::audio::spectralMonitorSelected()) return audioMonitorConflict(req);
     if (isRequestFromSetupAp(req) || paxg::wifi::isSetupOrApplyActive() || isMaintenanceActive()) {
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "application/json");
@@ -709,6 +855,7 @@ static esp_err_t post_stop_handler(httpd_req_t *req) {
 }
 
 static esp_err_t post_arm_handler(httpd_req_t *req) {
+    if (paxg::audio::spectralMonitorSelected()) return audioMonitorConflict(req);
     if (isRequestFromSetupAp(req) || paxg::wifi::isSetupOrApplyActive() || isMaintenanceActive()) {
         httpd_resp_set_status(req, "403 Forbidden");
         httpd_resp_set_type(req, "application/json");
@@ -833,6 +980,10 @@ bool startFishingWebServer(paxg::fishing::LiveFishingController* controller,
         .user_ctx = nullptr
     };
     httpd_register_uri_handler(s_httpdHandle, &uri_post_bag_reset);
+    const httpd_uri_t audioGet{"/api/audio", HTTP_GET, get_audio_handler, nullptr};
+    const httpd_uri_t audioPost{"/api/audio", HTTP_POST, post_audio_handler, nullptr};
+    httpd_register_uri_handler(s_httpdHandle, &audioGet);
+    httpd_register_uri_handler(s_httpdHandle, &audioPost);
 
     return true;
 #else

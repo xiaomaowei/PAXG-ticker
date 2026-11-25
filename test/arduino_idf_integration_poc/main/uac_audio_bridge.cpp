@@ -5,8 +5,9 @@
 namespace paxg {
 namespace uac {
 
-UacAudioBridge::UacAudioBridge(paxg::audio::IAudioDetector* externalDetector)
+UacAudioBridge::UacAudioBridge(paxg::audio::IAudioDetector* externalDetector, MonoSink monoSink)
     : detector_(nullptr),
+      monoSink_(monoSink),
       residualLen_(0),
       packetsReceived_(0),
       bytesReceived_(0),
@@ -130,6 +131,7 @@ size_t UacAudioBridge::consumeUacChunk(const uint8_t* buf, size_t len) {
 
         if (scratchCount == SCRATCH_BUFFER_CAPACITY) {
             detector_->processSamples(monoScratch_, scratchCount);
+            if (monoSink_) monoSink_(monoScratch_, scratchCount);
             scratchCount = 0;
         }
     }
@@ -137,6 +139,7 @@ size_t UacAudioBridge::consumeUacChunk(const uint8_t* buf, size_t len) {
     // Flush any pending mono samples to the detector
     if (scratchCount > 0) {
         detector_->processSamples(monoScratch_, scratchCount);
+        if (monoSink_) monoSink_(monoScratch_, scratchCount);
         scratchCount = 0;
     }
 
