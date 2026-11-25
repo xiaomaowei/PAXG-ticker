@@ -18,6 +18,7 @@ struct MatchMetrics {
     float rms = 0;
     float peak = 0;
     float scores[3]{};
+    float bagScore = 0;
     unsigned best = 0;
     unsigned events = 0;
     unsigned queuedFrames = 0;
@@ -28,7 +29,8 @@ struct MatchMetrics {
     bool running = false;
 };
 
-void initAudioMatch();
+class BagFullDetector;
+void initAudioMatch(BagFullDetector& detector);
 void pushMatchPcm(const int16_t* samples, size_t count);
 void resetMatchStream();
 bool spectralMonitorSelected();

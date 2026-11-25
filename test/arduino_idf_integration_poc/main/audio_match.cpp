@@ -1,4 +1,6 @@
 #include "audio_match.h"
+#include "bag_audio_reference.h"
+#include "bag_full_detector.h"
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +29,7 @@ std::mutex stateMutex;
 MatchSettings settings;
 MatchMetrics metrics;
 TaskHandle_t task = nullptr;
+BagFullDetector* bagFull = nullptr;
 
 struct Analysis {
     int16_t pcm[fft]{};
@@ -35,7 +38,7 @@ struct Analysis {
     float cosine[fft / 2]{}, sine[fft / 2]{};
     float history[frames][bands]{};
     float energy[frames]{};
-    unsigned pcmIndex = 0, filled = 0, next = 0, count = 0, cooldown = 0;
+    unsigned pcmIndex = 0, filled = 0, next = 0, count = 0, cooldown = 0, bagCooldown = 0;
 
     void init() {
         for (int i = 0; i < fft; ++i) hann[i] = 0.5f - 0.5f * std::cos(tau * i / (fft - 1));
@@ -45,7 +48,7 @@ struct Analysis {
         }
     }
 
-    void reset() { pcmIndex = filled = next = count = cooldown = 0; }
+    void reset() { pcmIndex = filled = next = count = cooldown = bagCooldown = 0; }
 
     void transform(MatchMetrics& out) {
         float sumSquares = 0, peak = 0;
@@ -66,6 +69,10 @@ struct Analysis {
         out.rms = std::sqrt(sumSquares / fft);
         out.peak = peak;
         energy[next] = sumSquares / fft;
+        if (energy[next] <= minEnergy) {
+            std::fill_n(real, fft, 0.0f);
+            return;
+        }
         for (int width = 2; width <= fft; width *= 2) {
             for (int start = 0; start < fft; start += width) {
                 for (int i = 0; i < width / 2; ++i) {
@@ -106,17 +113,27 @@ struct Analysis {
         next = (next + 1) % frames;
         count = std::min(count + 1, static_cast<unsigned>(frames));
         if (count < frames) return;
-        float norm = 0, maxEnergy = 0, dots[3]{};
+        float norm = 0, maxEnergy = 0, bagDot = 0, dots[3]{};
         for (int f = 0; f < frames; ++f) {
             const unsigned index = (next + f) % frames;
             maxEnergy = std::max(maxEnergy, energy[index]);
             for (int band = 0; band < bands; ++band) {
                 const float value = history[index][band];
                 norm += value * value;
-                for (int t = 0; t < 3; ++t) dots[t] += value * templates[t][f][band];
+                bagDot += value * bagTemplate[f][band];
+                if (config.spectral) {
+                    for (int t = 0; t < 3; ++t) dots[t] += value * templates[t][f][band];
+                }
             }
         }
         const float inverse = norm > 0 ? 1 / std::sqrt(norm) : 0;
+        out.bagScore = std::clamp(bagDot * inverse, -1.0f, 1.0f);
+        if (bagCooldown) --bagCooldown;
+        if (!bagCooldown && maxEnergy > minEnergy && out.bagScore >= bagThreshold) {
+            bagFull->registerPulse(static_cast<uint32_t>(esp_timer_get_time() / 1000), out.rms * 32768.0f);
+            bagCooldown = 130; // 1.30 s, longer than the 1.26 s source clip.
+        }
+        if (!config.spectral) return;
         for (unsigned t = 0; t < 3; ++t) {
             out.scores[t] = std::clamp(dots[t] * inverse, -1.0f, 1.0f);
             if (!(config.templateMask & (1u << t))) continue;
@@ -184,7 +201,8 @@ void matchTask(void*) {
 }
 }  // namespace
 
-void initAudioMatch() {
+void initAudioMatch(BagFullDetector& detector) {
+    bagFull = &detector;
     nvs_handle_t handle;
     if (nvs_open("paxg_audio", NVS_READONLY, &handle) == ESP_OK) {
         MatchSettings saved;
@@ -199,7 +217,7 @@ void initAudioMatch() {
 }
 
 void pushMatchPcm(const int16_t* samples, size_t count) {
-    if (!task || !spectralMonitorSelected()) return;
+    if (!task) return;
     const unsigned write = written.load(std::memory_order_relaxed);
     const unsigned read = consumed.load(std::memory_order_acquire);
     if (count > ringSize - (write - read)) {
@@ -212,7 +230,7 @@ void pushMatchPcm(const int16_t* samples, size_t count) {
     std::memcpy(ring + start, samples, first * sizeof(*samples));
     std::memcpy(ring, samples + first, (count - first) * sizeof(*samples));
     written.store(write + count, std::memory_order_release);
-    if (write + count - read >= hop) xTaskNotifyGive(task);
+    if (write - read < hop && write + count - read >= hop) xTaskNotifyGive(task);
 }
 
 void resetMatchStream() {

@@ -58,10 +58,8 @@ public:
     static constexpr size_t SCRATCH_BUFFER_CAPACITY = 128; // Bounded mono staging buffer
 
     using MonoSink = void (*)(const int16_t*, size_t);
-    // For frame sizes at least SCRATCH_BUFFER_CAPACITY, receives every completed RMS frame.
-    using RmsSink = void (*)(float);
     explicit UacAudioBridge(paxg::audio::IAudioDetector* externalDetector = nullptr,
-                            MonoSink monoSink = nullptr, RmsSink rmsSink = nullptr);
+                            MonoSink monoSink = nullptr);
     ~UacAudioBridge() = default;
 
     // Non-copyable, non-movable to ensure deterministic task ownership
@@ -132,13 +130,11 @@ public:
     void updateConfig(const paxg::audio::AudioDetectorConfig& config);
 
 private:
-    void feedMonoLocked(size_t count);
     void resetLocked();
     void updateSnapshotLocked();
 
     paxg::audio::IAudioDetector* detector_;
     const MonoSink monoSink_;
-    const RmsSink rmsSink_;
     paxg::audio::PcmAudioDetector defaultDetector_;
     mutable std::mutex mutex_;
 

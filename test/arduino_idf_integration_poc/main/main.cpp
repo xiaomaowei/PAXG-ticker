@@ -39,13 +39,10 @@ void (* volatile g_wifi_anchor_ref)() = &dummy_wifi_symbol_retention_anchor;
 
 // Evidence-calibrated full-bag addon bell detector (3000ms +/- 350ms period)
 static paxg::audio::BagFullDetector g_bag_full_detector;
-static void processBagFullRms(float rms) {
-    g_bag_full_detector.processRms(millis(), rms);
-}
 
 // Bounded allocation-free UAC PCM bridge feeding production PcmAudioDetector
 static_assert(paxg::uac::UacAudioBridge::EXPECTED_SAMPLE_RATE == paxg::audio::reference::rate);
-static paxg::uac::UacAudioBridge g_uac_audio_bridge(nullptr, paxg::audio::pushMatchPcm, processBagFullRms);
+static paxg::uac::UacAudioBridge g_uac_audio_bridge(nullptr, paxg::audio::pushMatchPcm);
 static std::atomic<bool> s_otaAudioPaused{false};
 static std::atomic<uint32_t> s_audioDiscontinuities{0};
 
@@ -816,7 +813,6 @@ static void renderFishingScreen(uint32_t now, bool forceRedraw = false) {
 // Setup & Loop
 // ----------------------------------------------------------------------------
 void setup() {
-    paxg::audio::initAudioMatch();
     Serial.begin(115200);
 
     // 1. Initialize physical buttons
@@ -845,6 +841,7 @@ void setup() {
     bagCal.debounceWindowMs = 500;
     bagCal.requiredMatches = 2;
     g_bag_full_detector.updateCalibration(bagCal);
+    paxg::audio::initAudioMatch(g_bag_full_detector);
 
     // 3. Initialize live fishing controller (defaults to Disarmed & Idle)
     g_fishing_controller.init();

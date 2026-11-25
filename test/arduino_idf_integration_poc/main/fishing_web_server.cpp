@@ -215,8 +215,10 @@ R"AUDIO(
 </script>
 )AUDIO"
 "<script>\n"
+"let statusPending=false;\n"
 "function update(){\n"
-"fetch('/api/status').then(r=>r.json()).then(d=>{\n"
+"if(statusPending)return;statusPending=true;\n"
+"fetch('/api/status',{signal:AbortSignal.timeout(5000)}).then(r=>{if(!r.ok)throw Error(r.status);return r.json();}).then(d=>{\n"
 "document.getElementById('dev-ip').innerText=d.ip||'Online';\n"
 "const b=document.getElementById('arm-badge');\n"
 "const btnArm=document.getElementById('btn-arm-toggle');\n"
@@ -241,9 +243,9 @@ R"AUDIO(
 "}else{\n"
 "alert.style.display='none';\n"
 "}\n"
-"}).catch(()=>{});\n"
+" }).catch(()=>{document.getElementById('dev-ip').innerText='Status unavailable';}).finally(()=>{statusPending=false;});\n"
 "}\n"
-"setInterval(update,500);update();\n"
+"setInterval(update,1000);update();\n"
 "function apiPost(u){\n"
 "fetch(u,{method:'POST'}).then(r=>r.json()).then(d=>{\n"
 "if(!d.success&&d.reason){\n"
@@ -771,12 +773,12 @@ static esp_err_t get_audio_handler(httpd_req_t* req) {
     std::snprintf(json, sizeof(json),
         "{\"mode\":%u,\"threshold\":%u,\"mask\":%u,\"debug\":%u,\"rms\":%.6f,\"peak\":%.6f,"
         "\"scores\":[%.4f,%.4f,%.4f],\"best\":%u,\"events\":%u,"
-        "\"queued\":%u,\"dropped\":%u,\"dsp_us\":%u,\"max_dsp_us\":%u,"
+        "\"bag_similarity\":%.4f,\"queued\":%u,\"dropped\":%u,\"dsp_us\":%u,\"max_dsp_us\":%u,"
         "\"stack_free\":%u,\"heap\":%u,\"min_heap\":%u,\"running\":%s}",
         unsigned(config.spectral), unsigned(config.thresholdPercent), unsigned(config.templateMask), unsigned(config.debug),
         config.spectral ? m.rms : legacy.audioRms / 32768.0f,
         config.spectral ? m.peak : legacy.audioPeak / 32768.0f,
-        m.scores[0], m.scores[1], m.scores[2], m.best, m.events, m.queuedFrames, m.droppedFrames,
+        m.scores[0], m.scores[1], m.scores[2], m.best, m.events, m.bagScore, m.queuedFrames, m.droppedFrames,
         m.dspUs, m.maxDspUs, m.stackFree, unsigned(esp_get_free_heap_size()), unsigned(esp_get_minimum_free_heap_size()),
         m.running ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
