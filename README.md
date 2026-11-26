@@ -55,7 +55,7 @@ PAXG-ticker is an ESP32-S3 firmware project for the LILYGO T-Display S3. The dev
   - Root `/` serves an embedded public static dashboard shell without exposing live telemetry unauthenticated.
   - REST API endpoints (`/api/version`, `/api/health`, `/api/logs`, `/api/update`, `/api/reboot`, `/api/rollback`) strictly protected by independent 256-bit Bearer Token.
   - Dual-slot partition layout (`app0` / `app1`) with ESP-IDF Bootloader automatic rollback protection.
-- **釣魚音訊判定**：從拋竿按鍵送出起忽略 2.2 秒的咬鉤訊號，之後音量須連續 32 ms 超過門檻才會收竿。USB 音訊串流切換時會暫停送出新按鍵、丟棄尚未送出的收竿指令，待音訊恢復且串流穩定 250 ms 後才繼續。音訊恢復逾時、USB 拔除或佇列溢位仍會停止。
+- **釣魚音訊判定**：從拋竿按鍵送出起忽略 2.2 秒的咬鉤訊號，之後音量須連續 32 ms 超過門檻才會收竿。USB 音訊串流切換或佇列丟包時會暫停送出新按鍵，丟棄尚未送出的收竿指令；收到新封包且至少 250 ms 未再發現中斷或丟包後才繼續。音訊恢復逾時或 USB 拔除仍會停止。
 - **MacroDroid Webhook 停止通知**: 於根目錄 `.env` 設定 `MACRODROID_WEBHOOK_URL`（未設定則休眠）。僅在實際活躍釣魚會話因背包滿（`BAG_FULL`）停止並回到 Idle 時，透過 FreeRTOS 計數任務通知喚醒低優先級背景 Worker 執行單次 HTTPS GET（5 秒逾時、不重試、停用重定向、附加 CRT bundle、不記錄 URL，僅 2xx 視為成功）。手動停止、故障、閒置時偵測或正常收拋竿均不觸發。
 
 - **Safe Boot Default**:

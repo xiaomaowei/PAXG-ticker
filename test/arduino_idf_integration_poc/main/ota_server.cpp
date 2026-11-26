@@ -64,19 +64,15 @@ static constexpr const char* TAG           = "paxg_ota";
 static constexpr const char* kNvsNs        = "paxg_ota";
 static constexpr const char* kNvsTokenKey  = "token";
 static constexpr size_t      kWriteBlock   = 4096;
-// Prefix size: esp_image_header_t(4) + esp_image_segment_header_t(8) + esp_app_desc_t(256) = 268
-// Round up to 288 to cover any padding and ensure full descriptor read.
-static constexpr size_t      kPrefixBytes  = 288;
+static constexpr size_t      kAppDescOffset =
+    sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+static constexpr size_t      kPrefixBytes  = kAppDescOffset + sizeof(esp_app_desc_t);
 static constexpr uint32_t    kTotalDeadMs  = 120000;
 static constexpr uint32_t    kIdleDeadMs   = 15000;
 static constexpr uint32_t    kRestartDelMs = 2000;
 static constexpr uint32_t    kMaintTmoMs   = 5000;
 static constexpr size_t      kLogEntryLen  = 128;
 static constexpr size_t      kJsonBuf      = 1200;
-
-// Offset of esp_app_desc_t within firmware image:
-// esp_image_header_t (4 bytes) + esp_image_segment_header_t (8 bytes) = 12 bytes
-static constexpr size_t kAppDescOffset = 12;
 
 // ---------------------------------------------------------------------------
 // Module-level state
@@ -495,20 +491,16 @@ static esp_err_t handle_update(httpd_req_t* req) {
     }
 
     // 10. Validate esp_app_desc_t at kAppDescOffset
-    if (kAppDescOffset + sizeof(esp_app_desc_t) > kPrefixBytes) {
-        // Should never happen with kPrefixBytes=288 and sizeof(esp_app_desc_t)≤256
-        return update_reject(req, 500, "internal", "prefix_size");
-    }
-    const esp_app_desc_t* imgDesc =
-        reinterpret_cast<const esp_app_desc_t*>(prefix + kAppDescOffset);
-    if (imgDesc->magic_word != ESP_APP_DESC_MAGIC_WORD) {
+    esp_app_desc_t imgDesc;
+    memcpy(&imgDesc, prefix + kAppDescOffset, sizeof(imgDesc));
+    if (imgDesc.magic_word != ESP_APP_DESC_MAGIC_WORD) {
         return update_reject(req, 400, "bad_image", "bad_desc_magic");
     }
-    if (strncmp(imgDesc->project_name, "esp32s3_arduino_idf_poc",
-                sizeof(imgDesc->project_name)) != 0) {
+    if (strncmp(imgDesc.project_name, "esp32s3_arduino_idf_poc",
+                sizeof(imgDesc.project_name)) != 0) {
         return update_reject(req, 400, "bad_image", "project_mismatch");
     }
-    if (strncmp(imgDesc->version, paxg::ota::kVersionPrefix,
+    if (strncmp(imgDesc.version, paxg::ota::kVersionPrefix,
                 strlen(paxg::ota::kVersionPrefix)) != 0) {
         return update_reject(req, 400, "bad_image", "version_prefix");
     }

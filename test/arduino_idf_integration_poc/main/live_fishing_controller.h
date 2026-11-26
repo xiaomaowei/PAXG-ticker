@@ -220,11 +220,11 @@ private:
     uint32_t lastPacketArrivalMs_ = 0;
     uint64_t armPacketsBaseline_ = 0;
     uint64_t lastDiscontinuities_ = 0;
-    uint32_t initialQueueDrops_ = 0;
+    uint32_t lastQueueDrops_ = 0;
     bool recoveringAudio_ = false;
+    StopReason recoveryStopReason_ = StopReason::None;
     uint32_t recoveryStartedMs_ = 0;
-    uint32_t lastStreamChangeMs_ = 0;
-    uint64_t packetsAtStreamChange_ = 0;
+    uint32_t lastAudioGapMs_ = 0;
 
     // Non-blocking HID key state
     KeyState keyState_ = KeyState::Idle;

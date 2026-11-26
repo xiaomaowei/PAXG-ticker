@@ -31,7 +31,6 @@ void LiveFishingController::init() {
     lastPacketsReceived_ = audioStream_ ? audioStream_->getPacketsReceived() : 0;
     armPacketsBaseline_ = 0;
     recoveringAudio_ = false;
-    initialQueueDrops_ = audioStream_ ? audioStream_->getQueueDrops() : 0;
     if (audioStream_) {
         audioStream_->clearTrigger();
     }
@@ -225,7 +224,7 @@ bool LiveFishingController::requestStart() {
 
     // Capture baseline metrics at start of active session
     lastDiscontinuities_ = audioStream_->getDiscontinuities();
-    initialQueueDrops_ = audioStream_->getQueueDrops();
+    lastQueueDrops_ = audioStream_->getQueueDrops();
 
     // Start fishing sequence
     if (fsm_.handleEvent(FishingEvent::Start)) {
@@ -321,21 +320,21 @@ void LiveFishingController::checkSafetyGuards(uint32_t now) {
             return;
         }
 
-        // Queue overflow discards audio, so keep the existing fail-closed behavior.
-        if (audioStream_->getQueueDrops() > initialQueueDrops_) {
-            requestStop(StopReason::QueueOverflowDrop);
-            return;
-        }
-
+        const uint32_t queueDrops = audioStream_->getQueueDrops();
+        const bool droppedAudio = queueDrops != lastQueueDrops_;
         const uint64_t discontinuities = audioStream_->getDiscontinuities();
-        if (discontinuities != lastDiscontinuities_) {
+        if (droppedAudio || discontinuities != lastDiscontinuities_) {
+            lastQueueDrops_ = queueDrops;
             lastDiscontinuities_ = discontinuities;
             if (!recoveringAudio_) {
                 recoveryStartedMs_ = now;
                 recoveringAudio_ = true;
+                recoveryStopReason_ = StopReason::StreamDiscontinuity;
             }
-            lastStreamChangeMs_ = now;
-            packetsAtStreamChange_ = lastPacketsReceived_;
+            if (droppedAudio) {
+                recoveryStopReason_ = StopReason::QueueOverflowDrop;
+            }
+            lastAudioGapMs_ = now;
 
             const auto state = fsm_.getState();
             if (state == FishingState::BiteDetected ||
@@ -348,9 +347,8 @@ void LiveFishingController::checkSafetyGuards(uint32_t now) {
 
         if (recoveringAudio_) {
             if (now - recoveryStartedMs_ >= STREAM_TIMEOUT_MS) {
-                requestStop(StopReason::StreamDiscontinuity);
-            } else if (now - lastStreamChangeMs_ >= STREAM_SETTLE_MS &&
-                       lastPacketsReceived_ > packetsAtStreamChange_) {
+                requestStop(recoveryStopReason_);
+            } else if (now - lastAudioGapMs_ >= STREAM_SETTLE_MS && lastPacketArrivalMs_ == now) {
                 audioStream_->clearTrigger();
                 recoveringAudio_ = false;
             }
