@@ -166,6 +166,7 @@ bool LiveFishingController::requestArmToggle() {
     }
 
     if (!armed_) {
+        ++stopId_;
         armed_ = true;
         requireButtonsReleaseAfterArm_ = true;
         armPacketsBaseline_ = audioStream_ ? audioStream_->getPacketsReceived() : 0;
@@ -243,8 +244,22 @@ bool LiveFishingController::requestStart() {
     return false;
 }
 
+bool LiveFishingController::resumeAfterQueueOverflow(uint32_t stopId) {
+    if (stopId != stopId_ || lastStopReason_ != StopReason::QueueOverflowDrop ||
+        armed_ || fsm_.getState() != FishingState::Idle) {
+        return false;
+    }
+    armed_ = true;
+    if (requestStart()) {
+        return true;
+    }
+    armed_ = false;
+    return false;
+}
+
 void LiveFishingController::requestStop(StopReason reason) {
     const bool wasActive = (fsm_.getState() != FishingState::Idle);
+    ++stopId_;
 
     armed_ = false; // Stop, dropout, disconnect, or error always disarms for safety
     recoveringAudio_ = false;
@@ -280,8 +295,9 @@ void LiveFishingController::requestStop(StopReason reason) {
 
     lastStopReason_ = reason;
 
-    if (wasActive && reason == StopReason::BagFull && bagFullStopCallback_) {
-        bagFullStopCallback_();
+    if (wasActive && stopNotificationCallback_ &&
+        (reason == StopReason::BagFull || reason == StopReason::QueueOverflowDrop)) {
+        stopNotificationCallback_(reason, stopId_);
     }
 }
 

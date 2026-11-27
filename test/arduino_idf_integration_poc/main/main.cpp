@@ -821,8 +821,8 @@ void setup() {
     audioCfg.frameSize = 384;      // 8.0 ms frame duration at 48 kHz
     audioCfg.debounceFrames = 4;   // Require 32 ms above threshold for a bite
     audioCfg.cooldownFrames = 25;  // 200.0 ms lockout following trigger
-    audioCfg.absoluteThreshold = 1500;
-    audioCfg.thresholdRatio = 2.5f;
+    audioCfg.absoluteThreshold = paxg::web::loadBiteRmsThreshold();
+    audioCfg.thresholdRatio = 0.0f;
     audioCfg.noiseFloorAlpha = 0.05f;
     g_uac_audio_bridge.init(nullptr, &audioCfg);
 
@@ -839,7 +839,7 @@ void setup() {
     // 3. Initialize live fishing controller (defaults to Disarmed & Idle)
     g_fishing_controller.init();
     paxg::notification::initStopNotification();
-    g_fishing_controller.setBagFullStopCallback(paxg::notification::onActiveBagFullStop);
+    g_fishing_controller.setStopNotificationCallback(paxg::notification::notifyFishingStop);
 
     // 4. TFT display initialization
     tft.begin();
@@ -982,6 +982,22 @@ void loop() {
     }
     s_prevRawUp = rawUp;
     s_prevRawDown = rawDown;
+
+    constexpr uint32_t QUEUE_OVERFLOW_RESTART_DELAY_MS = 180000;
+    static uint32_t pendingQueueOverflowStop = 0;
+    static uint32_t queueOverflowNotifiedAt = 0;
+    const uint32_t dispatchedStop = paxg::notification::takeDispatchedQueueOverflowStop();
+    if (dispatchedStop != 0) {
+        pendingQueueOverflowStop = dispatchedStop;
+        queueOverflowNotifiedAt = millis();
+    }
+    if (navPaused || wifiManager.isSetupOrApplyActive()) {
+        pendingQueueOverflowStop = 0;
+    } else if (pendingQueueOverflowStop != 0 &&
+               millis() - queueOverflowNotifiedAt >= QUEUE_OVERFLOW_RESTART_DELAY_MS) {
+        g_fishing_controller.resumeAfterQueueOverflow(pendingQueueOverflowStop);
+        pendingQueueOverflowStop = 0;
+    }
 
     // 6. Publish synchronized status snapshot for web readers
     paxg::web::publishStatusSnapshot(&g_fishing_controller, &g_bag_full_detector, &g_uac_audio_bridge,

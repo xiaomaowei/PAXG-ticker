@@ -1,10 +1,12 @@
 #include "fishing_stop_notification.h"
 
+#include <atomic>
 #include <WiFi.h>
 #include <esp_log.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/task.h>
 
 namespace paxg {
@@ -13,15 +15,30 @@ namespace notification {
 namespace {
 
 static const char* TAG = "FISHING_NOTIF";
-static TaskHandle_t s_notificationTask = nullptr;
+static QueueHandle_t s_webhookQueue = nullptr;
+static std::atomic<uint32_t> s_dispatchedQueueOverflowStop{0};
 
-#if defined(MACRODROID_WEBHOOK_URL)
+struct WebhookNotification {
+    const char* url;
+    uint32_t queueOverflowStopId;
+};
+
+#ifndef MACRODROID_WEBHOOK_URL
+#define MACRODROID_WEBHOOK_URL ""
+#endif
+#ifndef MACRODROID_QUEUE_OVERFLOW_WEBHOOK_URL
+#define MACRODROID_QUEUE_OVERFLOW_WEBHOOK_URL ""
+#endif
+
+static constexpr char kBagFullWebhook[] = MACRODROID_WEBHOOK_URL;
+static constexpr char kQueueOverflowWebhook[] = MACRODROID_QUEUE_OVERFLOW_WEBHOOK_URL;
+
 static void notificationTaskLoop(void* arg) {
     (void)arg;
 
     while (true) {
-        // Wait for counting task notification from onActiveBagFullStop
-        ulTaskNotifyTake(pdFALSE, portMAX_DELAY);
+        WebhookNotification notification;
+        xQueueReceive(s_webhookQueue, &notification, portMAX_DELAY);
 
         if (WiFi.status() != WL_CONNECTED) {
             ESP_LOGI(TAG, "Wi-Fi unavailable, skipping webhook notification");
@@ -29,7 +46,7 @@ static void notificationTaskLoop(void* arg) {
         }
 
         esp_http_client_config_t config = {};
-        config.url = MACRODROID_WEBHOOK_URL;
+        config.url = notification.url;
         config.timeout_ms = 5000;
         config.disable_auto_redirect = true;
         config.max_redirection_count = 0;
@@ -46,6 +63,9 @@ static void notificationTaskLoop(void* arg) {
             int statusCode = esp_http_client_get_status_code(client);
             if (statusCode >= 200 && statusCode <= 299) {
                 ESP_LOGI(TAG, "Webhook dispatched successfully status=%d", statusCode);
+                if (notification.queueOverflowStopId != 0) {
+                    s_dispatchedQueueOverflowStop.store(notification.queueOverflowStopId);
+                }
             } else {
                 ESP_LOGW(TAG, "Webhook returned non-2xx status=%d", statusCode);
             }
@@ -56,15 +76,17 @@ static void notificationTaskLoop(void* arg) {
         esp_http_client_cleanup(client);
     }
 }
-#endif
 
 }  // namespace
 
 void initStopNotification() {
-#if defined(MACRODROID_WEBHOOK_URL)
-    const char* urlLiteral = MACRODROID_WEBHOOK_URL;
-    if (urlLiteral[0] == '\0') {
-        ESP_LOGI(TAG, "MacroDroid webhook URL empty; feature dormant");
+    if (kBagFullWebhook[0] == '\0' && kQueueOverflowWebhook[0] == '\0') {
+        ESP_LOGI(TAG, "MacroDroid webhooks are not configured; feature dormant");
+        return;
+    }
+    s_webhookQueue = xQueueCreate(8, sizeof(WebhookNotification));
+    if (s_webhookQueue == nullptr) {
+        ESP_LOGE(TAG, "Failed to create webhook queue");
         return;
     }
 
@@ -74,23 +96,32 @@ void initStopNotification() {
         4096,
         nullptr,
         1,
-        &s_notificationTask,
+        nullptr,
         0
     );
     if (res == pdPASS) {
         ESP_LOGI(TAG, "MacroDroid stop notification worker initialized");
     } else {
+        vQueueDelete(s_webhookQueue);
+        s_webhookQueue = nullptr;
         ESP_LOGE(TAG, "Failed to create notification task");
     }
-#else
-    ESP_LOGI(TAG, "MacroDroid webhook URL not defined; feature dormant");
-#endif
 }
 
-void onActiveBagFullStop() {
-    if (s_notificationTask != nullptr) {
-        xTaskNotifyGive(s_notificationTask);
+void notifyFishingStop(fishing::StopReason reason, uint32_t stopId) {
+    const bool queueOverflow = reason == fishing::StopReason::QueueOverflowDrop;
+    const WebhookNotification notification{
+        queueOverflow ? kQueueOverflowWebhook : kBagFullWebhook,
+        queueOverflow ? stopId : 0
+    };
+    if (s_webhookQueue != nullptr && notification.url[0] != '\0' &&
+        xQueueSend(s_webhookQueue, &notification, 0) != pdPASS) {
+        ESP_LOGW(TAG, "Webhook queue full");
     }
+}
+
+uint32_t takeDispatchedQueueOverflowStop() {
+    return s_dispatchedQueueOverflowStop.exchange(0);
 }
 
 }  // namespace notification

@@ -90,6 +90,7 @@ if Import:
     password = dotenv_values.get("WIFI_PASSWORD", "")
     timezone = dotenv_values.get("APP_TIMEZONE", "CST-8")
     macrodroid_url = dotenv_values.get("MACRODROID_WEBHOOK_URL", "")
+    queue_overflow_url = dotenv_values.get("MACRODROID_QUEUE_OVERFLOW_WEBHOOK_URL", "")
 
     cpp_defines = []
     if ssid and password:
@@ -103,6 +104,8 @@ if Import:
 
     if macrodroid_url:
         cpp_defines.append(("MACRODROID_WEBHOOK_URL", _to_cpp_define_string(macrodroid_url)))
+    if queue_overflow_url:
+        cpp_defines.append(("MACRODROID_QUEUE_OVERFLOW_WEBHOOK_URL", _to_cpp_define_string(queue_overflow_url)))
 
     if cpp_defines:
         env.Append(CPPDEFINES=cpp_defines)

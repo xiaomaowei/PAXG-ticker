@@ -180,10 +180,11 @@ public:
     void requestStop(StopReason reason = StopReason::UserStopped);
     void updateKeypress(uint32_t now);
 
-    // Optional notification callback invoked on active-to-Idle transition due to BAG_FULL
-    using BagFullStopCallback = void (*)();
-    void setBagFullStopCallback(BagFullStopCallback cb) {
-        bagFullStopCallback_ = cb;
+    // Notify on active-to-Idle transitions due to BAG_FULL or QUEUE_OVERFLOW.
+    bool resumeAfterQueueOverflow(uint32_t stopId);
+    using StopNotificationCallback = void (*)(StopReason, uint32_t);
+    void setStopNotificationCallback(StopNotificationCallback cb) {
+        stopNotificationCallback_ = cb;
     }
 
 private:
@@ -238,8 +239,8 @@ private:
     uint32_t totalReels_ = 0;
     uint32_t totalTimeouts_ = 0;
 
-    // Optional BAG_FULL stop callback
-    BagFullStopCallback bagFullStopCallback_ = nullptr;
+    uint32_t stopId_ = 0;
+    StopNotificationCallback stopNotificationCallback_ = nullptr;
 };
 
 }  // namespace fishing

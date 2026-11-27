@@ -327,6 +327,10 @@ USB 回呼函式 `output_cb(buf, len, ...)` 收到的位元組長度可能非 4 
    - 有界執行緒安全指令佇列：所有 Web 控制指令（Start、Stop、ArmToggle、ResetBagFull）皆進入有界佇列，由控制器擁有者迴圈（`main.cpp` 的 `loop()`）順序執行。
    - 停止優先權保證（Stop Priority）：緊急停止指令擁有專屬優先插槽，且在入列時立即清除所有待處理之 Start 指令，由擁有者迴圈第一優先搶佔執行，保證停止與解除武裝絕對不被阻塞。
    - 命令實際結果回報：`submitCommandSync` 透過條件變數等待擁有者迴圈執行完成，向 HTTP 客戶端精確回報實際執行結果（如成功狀態或 `BAG_FULL`、`DISARMED`、`SAFETY_REJECTED` 原因代碼）。
+   - 釣魚首頁底部的 `Firmware` 欄位顯示裝置目前執行的韌體版本，開啟首頁即可查看。
+   - 展開釣魚首頁的 `Bite detection settings` 可調整咬鉤 RMS 門檻（1–32768）。儲存後立即套用，重啟後保留。恢復預設值會設回 1500。
+   - `BAG_FULL` 或 `QUEUE_OVERFLOW` 造成停釣時會觸發各自設定的 MacroDroid webhook。可在釣魚首頁的 `Stop Reason` 查看原因。短暫丟包後自動恢復時不會發通知。
+   - `QUEUE_OVERFLOW` webhook 收到 HTTP 2xx 後，韌體等待 3 分鐘，再依原本的開釣條件嘗試續釣一次。這段期間手動停止或操作解鎖會取消續釣。`BAG_FULL` 停釣後須手動處理。
    - 同步狀態快照（Synchronized Status Snapshot）：擁有者迴圈在每輪主迴圈末端發布完整快照至互斥鎖保護之結構體，HTTP `/api/status` 端點僅讀取已發布之快照，完全杜絕資料競爭。
 5. **可編輯 Wi-Fi 設定與斷線安全復原機制 (Editable Wi-Fi Settings & Setup AP Recovery)**：
    - **專屬 NVS 儲存與快閃保護**：Wi-Fi 憑證由 `paxg::wifi::WifiSettingsManager` 獨立管理，採用專屬 `paxg_wifi` NVS 命名空間，保持 `WiFi.persistent(false)`，絕不讓底層自動覆寫，且絕不改動 `.env`。

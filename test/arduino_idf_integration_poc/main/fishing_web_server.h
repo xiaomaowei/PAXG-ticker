@@ -120,6 +120,10 @@ const char* getIndexHtml();
  */
 const char* getWifiHtml();
 
+#if defined(ARDUINO) || defined(ESP_PLATFORM)
+uint32_t loadBiteRmsThreshold();
+#endif
+
 /**
  * @brief Start the local LAN HTTP web server on FreeRTOS task Core 0, priority 1.
  *        Guaranteed never to block or starve higher-priority USB audio tasks.

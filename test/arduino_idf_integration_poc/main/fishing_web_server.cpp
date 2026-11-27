@@ -1,15 +1,18 @@
 #include "fishing_web_server.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <condition_variable>
 #include <chrono>
 
 #if defined(ARDUINO) || defined(ESP_PLATFORM)
+#include <esp_app_desc.h>
 #include <esp_http_server.h>
 #include <WiFi.h>
 #include <esp_log.h>
+#include <nvs.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "usb_device_composite.h"
@@ -80,6 +83,7 @@ static bool s_mockRunning = false;
 #endif
 
 // Static HTML UI string stored in Flash (.rodata)
+#define INDEX_HTML_END "</body>\n</html>\n"
 static const char INDEX_HTML[] =
 "<!DOCTYPE html>\n"
 "<html lang=\"en\">\n"
@@ -134,6 +138,63 @@ static const char INDEX_HTML[] =
 "</div>\n"
 "<div class=\"footer\">Strict Fail-Closed | USB & Audio Safe Gating Active</div>\n"
 "</div>\n"
+R"AUDIO(
+<details id="audio-settings" style="margin:14px 0">
+<summary>Bite detection settings</summary>
+<form id="audio-form">
+<label>Bite RMS threshold <input id="audio-threshold" type="number" min="1" max="32768" required></label>
+<button type="submit">Save audio settings</button>
+<button type="button" id="audio-reset">Restore Default Settings</button>
+</form>
+<output id="audio-message" role="status"></output>
+<pre id="audio-metrics" style="white-space:pre-wrap"></pre>
+</details>
+<script>
+(() => {
+  const $ = id => document.getElementById('audio-' + id);
+  let initialized = false, polling = false, saving = false;
+  function update(d, controls) {
+    if (controls) {
+      $('threshold').value = d.threshold;
+      initialized = true;
+    }
+    $('metrics').textContent = 'Current RMS / peak  ' + d.rms.toFixed(1) + ' / ' + d.peak
+      + '\nBite RMS threshold  ' + d.threshold;
+  }
+  async function request(query) {
+    const response = await fetch('/api/audio' + (query ? '?' + query : ''),
+      query ? {method:'POST', headers:{'X-Requested-With':'XMLHttpRequest'}} : {});
+    if (!response.ok) throw Error(await response.text());
+    return response.json();
+  }
+  async function poll() {
+    if (!$('settings').open || saving || polling) return;
+    polling = true;
+    try {
+      const result = await request();
+      if (!saving) update(result, !initialized);
+    } catch (_) {
+      $('metrics').textContent = 'Audio telemetry unavailable';
+    } finally { polling = false; }
+  }
+  async function save(query) {
+    if (saving) return;
+    saving = true;
+    try { update(await request(query), true); $('message').textContent = 'Saved'; }
+    catch (err) { $('message').textContent = err.message; }
+    finally { saving = false; }
+  }
+  $('form').onsubmit = event => {
+    event.preventDefault();
+    save(new URLSearchParams({threshold:$('threshold').value}));
+  };
+  $('reset').onclick = () => save('restore=1');
+  $('settings').ontoggle = poll;
+  setInterval(poll, 1000);
+})();
+</script>
+)AUDIO"
+
 "<script>\n"
 "function update(){\n"
 "fetch('/api/status').then(r=>r.json()).then(d=>{\n"
@@ -173,8 +234,9 @@ static const char INDEX_HTML[] =
 "}).catch(e=>{alert('Network request failed: '+e)});\n"
 "}\n"
 "</script>\n"
-"</body>\n"
-"</html>\n";
+INDEX_HTML_END;
+static constexpr size_t INDEX_HTML_FOOTER_OFFSET = sizeof(INDEX_HTML) - sizeof(INDEX_HTML_END);
+#undef INDEX_HTML_END
 
 } // namespace
 
@@ -546,8 +608,17 @@ static bool isRequestFromSetupAp(httpd_req_t *req) {
 }
 
 static esp_err_t get_index_handler(httpd_req_t *req) {
+    char footer[96];
+    std::snprintf(footer, sizeof(footer), "<footer class=\"footer\">Firmware: %s</footer>\n",
+                  esp_app_get_description()->version);
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+    esp_err_t result = httpd_resp_send_chunk(req, INDEX_HTML, INDEX_HTML_FOOTER_OFFSET);
+    if (result != ESP_OK) return result;
+    result = httpd_resp_sendstr_chunk(req, footer);
+    if (result != ESP_OK) return result;
+    result = httpd_resp_sendstr_chunk(req, INDEX_HTML + INDEX_HTML_FOOTER_OFFSET);
+    if (result != ESP_OK) return result;
+    return httpd_resp_send_chunk(req, nullptr, 0);
 }
 
 static esp_err_t get_wifi_handler(httpd_req_t *req) {
@@ -669,6 +740,74 @@ static esp_err_t get_status_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     return httpd_resp_send(req, jsonBuf, HTTPD_RESP_USE_STRLEN);
+}
+
+static constexpr uint32_t defaultBiteRms = 1500;
+static constexpr uint32_t maxBiteRms = 32768;
+
+uint32_t loadBiteRmsThreshold() {
+    uint32_t threshold = defaultBiteRms;
+    nvs_handle_t handle;
+    if (nvs_open("paxg_audio", NVS_READONLY, &handle) == ESP_OK) {
+        nvs_get_u32(handle, "bite_rms", &threshold);
+        nvs_close(handle);
+    }
+    return threshold;
+}
+
+static esp_err_t get_audio_handler(httpd_req_t* req) {
+    auto& bridge = *static_cast<paxg::uac::UacAudioBridge*>(req->user_ctx);
+    const auto audio = bridge.getMetricsSnapshot().detectorMetrics;
+    const auto config = bridge.getConfig();
+    char json[128];
+    std::snprintf(json, sizeof(json),
+        "{\"threshold\":%d,\"rms\":%.1f,\"peak\":%u}",
+        static_cast<int>(config.absoluteThreshold), audio.rms,
+        static_cast<unsigned>(audio.peak));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, json);
+}
+
+static esp_err_t post_audio_handler(httpd_req_t* req) {
+    char requestedWith[16];
+    if (httpd_req_get_hdr_value_str(req, "X-Requested-With", requestedWith, sizeof(requestedWith)) != ESP_OK ||
+        std::strcmp(requestedWith, "XMLHttpRequest") != 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing audio settings request header");
+    }
+    if (isRequestFromSetupAp(req) || paxg::wifi::isSetupOrApplyActive() || isMaintenanceActive()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "Audio settings unavailable during setup or OTA");
+    }
+    char query[96], value[8];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing audio settings");
+    uint32_t threshold = defaultBiteRms;
+    if (std::strcmp(query, "restore=1") != 0) {
+        if (httpd_query_key_value(query, "threshold", value, sizeof(value)) != ESP_OK ||
+            value[0] == '\0' || std::strspn(value, "0123456789") != std::strlen(value))
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid RMS threshold");
+        const auto parsed = std::strtoul(value, nullptr, 10);
+        if (parsed < 1 || parsed > maxBiteRms)
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "RMS threshold must be 1 to 32768");
+        threshold = parsed;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open("paxg_audio", NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_u32(handle, "bite_rms", threshold);
+        if (err == ESP_OK) err = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (err != ESP_OK)
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not save RMS threshold");
+
+    auto& bridge = *static_cast<paxg::uac::UacAudioBridge*>(req->user_ctx);
+    auto config = bridge.getConfig();
+    config.absoluteThreshold = threshold;
+    bridge.updateConfig(config);
+    return get_audio_handler(req);
 }
 
 static esp_err_t post_start_handler(httpd_req_t *req) {
@@ -833,6 +972,12 @@ bool startFishingWebServer(paxg::fishing::LiveFishingController* controller,
         .user_ctx = nullptr
     };
     httpd_register_uri_handler(s_httpdHandle, &uri_post_bag_reset);
+    if (bridge) {
+        const httpd_uri_t audioGet{"/api/audio", HTTP_GET, get_audio_handler, bridge};
+        const httpd_uri_t audioPost{"/api/audio", HTTP_POST, post_audio_handler, bridge};
+        httpd_register_uri_handler(s_httpdHandle, &audioGet);
+        httpd_register_uri_handler(s_httpdHandle, &audioPost);
+    }
 
     return true;
 #else
