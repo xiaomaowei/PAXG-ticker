@@ -13,6 +13,7 @@
 #include "usb_audio_queue.h"
 #include "usb_device_composite.h"
 #include "uac_audio_bridge.h"
+#include "audio_match.h"
 #include "live_fishing_controller.h"
 #include "bag_full_detector.h"
 #include "fishing_web_server.h"
@@ -37,10 +38,10 @@ void dummy_wifi_symbol_retention_anchor() {
 void (* volatile g_wifi_anchor_ref)() = &dummy_wifi_symbol_retention_anchor;
 
 // Bounded allocation-free UAC PCM bridge feeding production PcmAudioDetector
-static paxg::uac::UacAudioBridge g_uac_audio_bridge;
+static paxg::uac::UacAudioBridge g_uac_audio_bridge(nullptr, paxg::audio::pushMatchPcm);
 static std::atomic<bool> s_otaAudioPaused{false};
 
-// Evidence-calibrated full-bag addon bell detector (3000ms +/- 350ms period, threshold > 3000)
+// Full-bag warning cadence detector (3000ms +/- 350ms period)
 static paxg::audio::BagFullDetector g_bag_full_detector;
 static std::atomic<uint32_t> s_audioDiscontinuities{0};
 
@@ -58,6 +59,7 @@ static void test_audio_discontinuity_cb(uint32_t reason, void *arg) {
     (void)reason;
     (void)arg;
     g_uac_audio_bridge.resetResidualOnStreamBreak();
+    paxg::audio::resetMatchStream();
     // A dropped packet is also signalled when its boundary reaches the consumer.
     s_audioDiscontinuities.fetch_add(1, std::memory_order_release);
 }
@@ -214,6 +216,7 @@ static bool otaMaintenanceBegin(uint32_t timeoutMs) {
     }
     paxg::market::setPaxgQuotePaused(true);
     s_otaAudioPaused.store(true, std::memory_order_release);
+    paxg::audio::resetMatchStream();
 
     const uint32_t started = millis();
     while (static_cast<uint32_t>(millis() - started) < timeoutMs) {
@@ -831,10 +834,10 @@ void setup() {
     bagCal.enabled = true;
     bagCal.bellIntervalMs = 3000;
     bagCal.intervalToleranceMs = 350;
-    bagCal.minRmsThreshold = 3000.0f;
     bagCal.debounceWindowMs = 500;
     bagCal.requiredMatches = 2;
     g_bag_full_detector.updateCalibration(bagCal);
+    paxg::audio::initAudioMatch(g_bag_full_detector);
 
     // 3. Initialize live fishing controller (defaults to Disarmed & Idle)
     g_fishing_controller.init();
@@ -921,11 +924,6 @@ void loop() {
 
     // Drain only the emergency stop while maintenance is held; start/arm queues were purged.
     paxg::web::processPendingCommands(&g_fishing_controller, &g_bag_full_detector, now);
-
-    if (!s_otaAudioPaused.load(std::memory_order_acquire)) {
-        const auto audioSnap = g_uac_audio_bridge.getMetricsSnapshot();
-        g_bag_full_detector.processRms(now, audioSnap.detectorMetrics.rms);
-    }
 
     const bool rawUp = (digitalRead(PIN_BUTTON_UP) == LOW);
     const bool rawDown = (digitalRead(PIN_BUTTON_DOWN) == LOW);

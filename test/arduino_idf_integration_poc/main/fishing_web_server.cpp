@@ -13,6 +13,7 @@
 #include <WiFi.h>
 #include <esp_log.h>
 #include <nvs.h>
+#include "audio_match.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "usb_device_composite.h"
@@ -159,7 +160,8 @@ R"AUDIO(
       initialized = true;
     }
     $('metrics').textContent = 'Current RMS / peak  ' + d.rms.toFixed(1) + ' / ' + d.peak
-      + '\nBite RMS threshold  ' + d.threshold;
+      + '\nBite RMS threshold  ' + d.threshold
+      + '\nBag warning similarity  ' + d.bag_similarity.toFixed(3);
   }
   async function request(query) {
     const response = await fetch('/api/audio' + (query ? '?' + query : ''),
@@ -759,11 +761,12 @@ static esp_err_t get_audio_handler(httpd_req_t* req) {
     auto& bridge = *static_cast<paxg::uac::UacAudioBridge*>(req->user_ctx);
     const auto audio = bridge.getMetricsSnapshot().detectorMetrics;
     const auto config = bridge.getConfig();
+    const auto match = paxg::audio::matchMetrics();
     char json[128];
     std::snprintf(json, sizeof(json),
-        "{\"threshold\":%d,\"rms\":%.1f,\"peak\":%u}",
+        "{\"threshold\":%d,\"rms\":%.1f,\"peak\":%u,\"bag_similarity\":%.4f}",
         static_cast<int>(config.absoluteThreshold), audio.rms,
-        static_cast<unsigned>(audio.peak));
+        static_cast<unsigned>(audio.peak), match.bagScore);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_sendstr(req, json);

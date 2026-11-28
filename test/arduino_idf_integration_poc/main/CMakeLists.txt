@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "audio_match.cpp"
         "uac_audio_bridge.cpp"
         "live_fishing_controller.cpp"
         "bag_full_detector.cpp"
